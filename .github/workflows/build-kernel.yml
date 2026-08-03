@@ -1,0 +1,71 @@
+name: Build NetHunter Kernel (oscar)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-kernel:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Kernel Source
+        uses: actions/checkout@v4
+
+      - name: Setup Environment
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential bc gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi libssl-dev libfl-dev
+          sudo apt-get install -y curl git cpio flex bison
+          
+      - name: Download Proton Clang
+        run: |
+          git clone --depth=1 https://github.com/kdrag0n/proton-clang.git clang
+          
+      - name: Build Kernel
+        run: |
+          export PATH=$(pwd)/clang/bin:$PATH
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+          export CC=clang
+          export AR=llvm-ar
+          export NM=llvm-nm
+          export OBJCOPY=llvm-objcopy
+          export OBJDUMP=llvm-objdump
+          export STRIP=llvm-strip
+          export ARCH=arm64
+          
+          # Build defconfig
+          make O=out ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1 \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            vendor/holi-qgki_defconfig
+          
+          # Compile Image
+          make O=out ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1 \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            -j$(nproc)
+          
+      - name: Collect kernel modules
+        run: |
+          mkdir -p AnyKernel3/modules
+          # Собираем все скомпилированные .ko из staging и wireless
+          find out/ -name "r8188eu.ko" -exec cp {} AnyKernel3/modules/ \;
+          find out/ -name "rt2800usb.ko" -exec cp {} AnyKernel3/modules/ \;
+          find out/ -name "rt2x00lib.ko" -exec cp {} AnyKernel3/modules/ \;
+          find out/ -name "rt2x00usb.ko" -exec cp {} AnyKernel3/modules/ \;
+          find out/ -name "rtl8xxxu.ko" -exec cp {} AnyKernel3/modules/ \;
+          find out/ -name "lib80211*.ko" -exec cp {} AnyKernel3/modules/ \;
+          echo "=== Собранные модули ==="
+          ls -la AnyKernel3/modules/ || echo "Нет модулей"
+
+      - name: Package with AnyKernel3
+        run: |
+          cp out/arch/arm64/boot/Image AnyKernel3/
+          cd AnyKernel3
+          zip -r9 ../NetHunter-Kernel-oscar.zip *
+          
+      - name: Upload Kernel Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: NetHunter-Kernel-oscar
+          path: NetHunter-Kernel-oscar.zip
