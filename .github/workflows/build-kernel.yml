@@ -20,11 +20,21 @@ jobs:
         run: |
           git clone --depth=1 https://github.com/kdrag0n/proton-clang.git clang
           
-      - name: Fix script permissions
+      - name: Fix permissions and broken symlinks
         run: |
           find . -name "*.sh" -exec chmod +x {} \;
           chmod +x scripts/kconfig/*
           chmod -R +x AnyKernel3/
+          find . -type f -size -120c | while read -r file; do
+            content=$(cat "$file")
+            if [[ "$content" == ../* ]] || [[ "$content" == /* ]]; then
+              dir=$(dirname "$file")
+              if [ -e "$dir/$content" ]; then
+                rm "$file"
+                ln -s "$content" "$file"
+              fi
+            fi
+          done
           
       - name: Build Kernel
         run: |
