@@ -26,13 +26,14 @@ jobs:
           chmod +x scripts/kconfig/*
           chmod -R +x AnyKernel3/
           find . -type f -size -120c | while read -r file; do
-            content=$(cat "$file")
-            if [[ "$content" != *" "* ]] && [[ "$content" != *";"* ]] && [[ "$content" != *"#"* ]]; then
-              dir=$(dirname "$file")
-              if [ -e "$dir/$content" ] && [ "$dir/$content" != "$file" ]; then
-                rm "$file"
-                ln -s "$content" "$file"
-              fi
+            content=$(cat "$file" | tr -d '\r' | tr -d '\n')
+            if [ -z "$content" ] || [[ "$content" == *" "* ]] || [[ "$content" == *";"* ]] || [[ "$content" == *"#"* ]] || [[ "$content" == *$'\0'* ]]; then
+              continue
+            fi
+            dir=$(dirname "$file")
+            if [ -e "$dir/$content" ] && [ "$dir/$content" != "$file" ]; then
+              rm "$file"
+              ln -s "$content" "$file"
             fi
           done
           
