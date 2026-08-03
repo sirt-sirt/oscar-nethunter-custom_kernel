@@ -27,9 +27,9 @@ jobs:
           chmod -R +x AnyKernel3/
           find . -type f -size -120c | while read -r file; do
             content=$(cat "$file")
-            if [[ "$content" == ../* ]] || [[ "$content" == /* ]]; then
+            if [[ "$content" != *" "* ]] && [[ "$content" != *";"* ]] && [[ "$content" != *"#"* ]]; then
               dir=$(dirname "$file")
-              if [ -e "$dir/$content" ]; then
+              if [ -e "$dir/$content" ] && [ "$dir/$content" != "$file" ]; then
                 rm "$file"
                 ln -s "$content" "$file"
               fi
