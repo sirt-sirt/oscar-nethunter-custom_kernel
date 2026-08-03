@@ -20,6 +20,12 @@ jobs:
         run: |
           git clone --depth=1 https://github.com/kdrag0n/proton-clang.git clang
           
+      - name: Fix script permissions
+        run: |
+          find . -name "*.sh" -exec chmod +x {} \;
+          chmod +x scripts/kconfig/*
+          chmod -R +x AnyKernel3/
+          
       - name: Build Kernel
         run: |
           export PATH=$(pwd)/clang/bin:$PATH
