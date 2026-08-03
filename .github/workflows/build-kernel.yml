@@ -49,7 +49,16 @@ jobs:
           make O=out ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1 \
             CROSS_COMPILE=aarch64-linux-gnu- \
             CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
-            -j$(nproc)
+            -j$(nproc) 2>&1 | tee build.log
+
+      - name: Print real errors
+        if: failure()
+        run: |
+          echo "========================================="
+          echo "         ACTUAL COMPILER ERRORS          "
+          echo "========================================="
+          grep -iE "error:|fatal error:" build.log -B 2 -A 5 || true
+          echo "========================================="
           
       - name: Collect kernel modules
         run: |
@@ -70,7 +79,7 @@ jobs:
           cd AnyKernel3
           zip -r9 ../NetHunter-Kernel-oscar.zip *
           
-      - name: Upload Kernel Artifact
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: NetHunter-Kernel-oscar
