@@ -56,10 +56,13 @@ jobs:
         if: failure()
         run: |
           echo "========================================="
-          echo "         ACTUAL COMPILER ERRORS          "
+          echo "         ACTUAL ERRORS (grep)            "
           echo "========================================="
-          grep -iE "error:|fatal error:" build.log -B 2 -A 5 || true
-          echo "========================================="
+          grep -iE "(error[: ]|fatal|undefined reference|cannot find|no rule|FAILED)" build.log -B 3 -A 3 | tail -200 || true
+          echo "=========================================="
+          echo "         LAST 100 LINES OF BUILD LOG      "
+          echo "=========================================="
+          tail -100 build.log || true
           
       - name: Collect kernel modules
         run: |
@@ -80,6 +83,13 @@ jobs:
           cd AnyKernel3
           zip -r9 ../NetHunter-Kernel-oscar.zip *
           
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
+
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
