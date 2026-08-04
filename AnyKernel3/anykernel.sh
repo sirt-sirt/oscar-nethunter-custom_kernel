@@ -6,7 +6,7 @@
 properties() { '
 kernel.string=NetHunter Kernel for Realme 9 Pro (oscar)
 do.devicecheck=1
-do.modules=0
+do.modules=1
 do.systemless=1
 do.cleanup=1
 do.cleanuponabort=0
