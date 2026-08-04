@@ -1,6 +1,6 @@
 <div align="center">
-  <h1>🐉 NetHunter Custom Kernel 🐉</h1>
-  <h3>for Realme 9 Pro 5G (oscar)</h3>
+  <h1>NetHunter Custom Kernel</h1>
+  <h3>Realme 9 Pro 5G (oscar)</h3>
   
   <p>
     <a href="https://github.com/sirt-sirt/oscar-nethunter-custom_kernel/actions/workflows/build-kernel.yml">
@@ -11,64 +11,61 @@
 
 ---
 
-## 📱 Supported Devices
-* **Device:** Realme 9 Pro 5G
-* **Codename:** `oscar` (RMX3471 / RMX3472)
-* **SoC:** Qualcomm Snapdragon 695 5G (`sm6375` / `holi`)
-* **Base ROM:** LineageOS 21 (Android 14)
-* **Kernel Version:** Linux 5.4.280-qgki
+## Поддерживаемые устройства
+* **Устройство:** Realme 9 Pro 5G
+* **Кодовое имя:** `oscar` (RMX3471 / RMX3472)
+* **Процессор:** Qualcomm Snapdragon 695 5G (`sm6375` / `holi`)
+* **Базовая прошивка:** LineageOS 21 (Android 14)
+* **Версия ядра:** Linux 5.4.280-qgki
 
 ---
 
-## ⚡ Features (NetHunter Patches)
+## Особенности (Патчи NetHunter)
 
-This kernel has been heavily patched and customized specifically for **Kali NetHunter** penetration testing.
+Данное ядро было модифицировано специально для проведения аудита информационной безопасности с использованием мобильной платформы **Kali NetHunter**.
 
-### 🛡️ Kali Chroot Support
-* **System V IPC (`SYSVIPC`)**: Fully enabled for PostgreSQL and Metasploit database operation.
-* **Linux Namespaces**: Full isolation support enabled (`PID_NS`, `NET_NS`, `USER_NS`, `IPC_NS`, `UTS_NS`) to allow rootless execution and proper NetHunter chroot environments.
+### Поддержка Kali Chroot
+* **System V IPC (`SYSVIPC`)**: Включена поддержка для корректной работы баз данных PostgreSQL и Metasploit.
+* **Linux Namespaces**: Активирована полная изоляция (`PID_NS`, `NET_NS`, `USER_NS`, `IPC_NS`, `UTS_NS`) для обеспечения работоспособности chroot-окружения NetHunter и выполнения операций без root-прав в рамках контейнера.
 
-### 📡 Wireless & Packet Injection (Monitor Mode)
-* **Wireless Extensions (`CFG80211_WEXT`)**: Enabled to support legacy tools like `airodump-ng` and `aireplay-ng`.
-* **Realtek Vendor Support**: Activated staging drivers for external Wi-Fi adapters.
-* **Compiled Modules**: `r8188eu.ko` (TP-Link TL-WN722N v2/v3), `rtl8xxxu.ko`, and required crypto libraries (`lib80211`) are built inline and flashed automatically via AnyKernel3.
+### Беспроводные сети и пакетные инъекции (Monitor Mode)
+* **Wireless Extensions (`CFG80211_WEXT`)**: Включена совместимость со старыми API, необходимыми для работы утилит `airodump-ng` и `aireplay-ng`.
+* **Поддержка вендора Realtek**: Активированы staging-драйверы для внешних Wi-Fi адаптеров.
+* **Скомпилированные модули**: Драйверы `r8188eu.ko` (TP-Link TL-WN722N v2/v3), `rtl8xxxu.ko` и криптографические библиотеки (`lib80211`) компилируются вместе с ядром и автоматически устанавливаются в систему с помощью AnyKernel3.
 
-### 🔌 USB OTG & External Hardware
-* **USB Serial / ACM**: Enabled `CONFIG_USB_ACM`, `CONFIG_USB_SERIAL` for SDRs and RFID tools (Proxmark3, HackRF One).
-* **Serial Adapters**: Support for `PL2303`, `FTDI_SIO`, `CH341`, and `CP210X` chips (covers 90% of external wireless adapters and hacking dongles).
-* **Bluetooth**: `CONFIG_BT_HCIBTUSB` enabled for external USB Bluetooth adapters (e.g. CSR8510) and `BT_BNEP` for Bluetooth network encapsulation and attacks.
+### USB OTG и внешнее оборудование
+* **USB Serial / ACM**: Активированы параметры `CONFIG_USB_ACM` и `CONFIG_USB_SERIAL` для работы с SDR и RFID-оборудованием (Proxmark3, HackRF One).
+* **Серийные адаптеры**: Добавлена поддержка чипов `PL2303`, `FTDI_SIO`, `CH341` и `CP210X` (охватывает большинство внешних беспроводных адаптеров).
+* **Bluetooth**: Параметр `CONFIG_BT_HCIBTUSB` включен для поддержки внешних USB Bluetooth-адаптеров (например, CSR8510). Параметр `BT_BNEP` активирован для сетевой инкапсуляции и Bluetooth-атак.
 
-### 🛠️ Engineering Fixes
-* **LTO & CFI Removed**: Disabled `CONFIG_LTO_CLANG` and `CONFIG_CFI_CLANG` to fix critical `ld.lld: R_AARCH64_ABS32` relocation linking errors and bypass rigid Control Flow Integrity checks that conflict with packet injection.
-* **Windows File-System Fix**: Resolved critical git clone case-sensitivity collisions in the `net/netfilter` subsystem (e.g. `xt_dscp.c` vs `xt_DSCP.c`) which previously broke compilation of `iptables` and VPN functions.
-* **Proton Clang**: Compiled using modern Proton Clang 13.0.0 with forced LLVM linker and assembler.
-
----
-
-## 📦 Installation
-
-This kernel is packaged with **AnyKernel3** and installs perfectly over LineageOS without replacing your vendor partitions or `ocdt`.
-
-1. Go to the **[Actions](https://github.com/sirt-sirt/oscar-nethunter-custom_kernel/actions)** tab.
-2. Click on the latest successful **Build NetHunter Kernel (oscar)** run.
-3. Download the `NetHunter-Kernel-oscar.zip` artifact at the bottom of the page.
-4. Extract the downloaded ZIP **once** to get the actual flashable `NetHunter-Kernel-oscar.zip`.
-5. Flash via:
-   * **Lineage Recovery / TWRP:** `Apply Update` -> `Choose from SD card` (or `adb sideload`).
-   * **Magisk:** Modules -> Install from Storage.
-6. Reboot and enjoy!
+### Инженерные исправления
+* **Удаление LTO и CFI**: Отключены параметры `CONFIG_LTO_CLANG` и `CONFIG_CFI_CLANG` для устранения критических ошибок линкера `ld.lld: R_AARCH64_ABS32` и обхода жестких проверок Control Flow Integrity, блокирующих пакетные инъекции.
+* **Исправление файловой системы Windows**: Устранены конфликты регистра в подсистеме `net/netfilter` (например, `xt_dscp.c` против `xt_DSCP.c`), возникавшие при клонировании репозитория в ОС Windows, что препятствовало компиляции модуля `iptables`.
+* **Proton Clang**: Ядро скомпилировано с использованием Proton Clang 13.0.0 с принудительным использованием LLVM линкера и ассемблера.
 
 ---
 
-## ⚙️ Compilation (GitHub Actions)
+## Установка
 
-You don't need a local Linux machine to build this. Just use GitHub Actions!
-1. Fork this repository.
-2. Go to the `Actions` tab and enable workflows.
-3. Select `Build NetHunter Kernel (oscar)` and click **Run workflow**.
-4. The `.ko` modules and the kernel `Image` will be automatically packaged into an AnyKernel3 zip.
+Ядро упаковано с помощью **AnyKernel3** и устанавливается поверх LineageOS без изменения вендорных разделов и `ocdt`.
 
-> **Note:** The AnyKernel script has `do.modules=1` which automatically pushes the Realtek Wi-Fi modules to your device during flashing.
+1. Перейдите на вкладку **[Actions](https://github.com/sirt-sirt/oscar-nethunter-custom_kernel/actions)**.
+2. Выберите последний успешный запуск **Build NetHunter Kernel (oscar)**.
+3. Скачайте артефакт `NetHunter-Kernel-oscar.zip` внизу страницы.
+4. Распакуйте скачанный ZIP-архив **один раз**, чтобы получить внутренний установочный файл `NetHunter-Kernel-oscar.zip`.
+5. Выполните прошивку:
+   * **Lineage Recovery / TWRP:** `Apply Update` -> `Choose from SD card` (или `adb sideload`).
+   * **Magisk:** Модули -> Установить из хранилища.
+6. Перезагрузите устройство.
 
 ---
-*Built with ❤️ for the cybersec community.*
+
+## Компиляция (GitHub Actions)
+
+Для сборки ядра локальная Linux-машина не требуется. Процесс полностью автоматизирован через GitHub Actions.
+1. Сделайте форк данного репозитория.
+2. Перейдите на вкладку `Actions` и включите workflows.
+3. Выберите `Build NetHunter Kernel (oscar)` и нажмите **Run workflow**.
+4. Модули `.ko` и бинарный файл ядра `Image` будут автоматически собраны и упакованы в архив AnyKernel3.
+
+> **Примечание:** Скрипт AnyKernel настроен с параметром `do.modules=1`, что обеспечивает автоматическую распаковку и установку внешних Wi-Fi модулей Realtek в системный раздел при прошивке архива.
