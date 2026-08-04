@@ -1018,3 +1018,5 @@ CONFIG_LIB80211_CRYPT_CCMP=m
 # Staging driver r8188eu � ���������� ��� .ko ������
 CONFIG_R8188EU=m
 CONFIG_88EU_AP_MODE=y
+
+CONFIG_MODULE_REL_CRCS=y
