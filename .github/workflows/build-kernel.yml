@@ -54,25 +54,6 @@ jobs:
             CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
             -j$(nproc) 2>&1 | tee build.log
 
-          echo "========================================="
-          echo "   COMPILING OUT-OF-TREE VENDOR MODULES  "
-          echo "========================================="
-          
-          # WLAN (qcacld-3.0)
-          make O=out ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1 \
-            CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
-            M=drivers/staging/qcacld-3.0 CONFIG_QCA_CLD_WLAN=m -j$(nproc) || echo "WLAN Build Failed"
-
-          # Techpack Audio
-          make O=out ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1 \
-            CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
-            M=techpack/audio -j$(nproc) || echo "Audio Build Failed"
-
-          # Techpack Camera
-          make O=out ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1 \
-            CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
-            M=techpack/camera -j$(nproc) || echo "Camera Build Failed"
-
       - name: Diagnostic Info
         run: |
           echo "========================================="
@@ -103,48 +84,24 @@ jobs:
           echo "=========================================="
           tail -100 build.log || true
           
-      - name: Collect kernel modules & Create Magisk Module
+      - name: Collect kernel modules
         run: |
           mkdir -p AnyKernel3/modules
-          # NetHunter specific modules (for AnyKernel3 ramdisk)
+          # Собираем все скомпилированные .ko из staging и wireless
           find out/ -name "r8188eu.ko" -exec cp {} AnyKernel3/modules/ \;
           find out/ -name "rt2800usb.ko" -exec cp {} AnyKernel3/modules/ \;
           find out/ -name "rt2x00lib.ko" -exec cp {} AnyKernel3/modules/ \;
           find out/ -name "rt2x00usb.ko" -exec cp {} AnyKernel3/modules/ \;
           find out/ -name "rtl8xxxu.ko" -exec cp {} AnyKernel3/modules/ \;
-          
-          # Create Magisk Module structure for Vendor modules
-          mkdir -p MagiskModule/system/vendor/lib/modules
-          
-          cat << 'EOF' > MagiskModule/module.prop
-          id=nethunter-vendor-modules
-          name=NetHunter Vendor Modules (Realme 9 Pro)
-          version=v1.0
-          versionCode=1
-          author=Kali NetHunter
-          description=Replaces vendor modules (WLAN, Camera, Audio) with kernel-matched versions to prevent ABI Kernel Panics.
-          EOF
-          
-          # Collect vendor modules into Magisk zip
-          find out/ -name "qca_cld3_wlan.ko" -exec cp {} MagiskModule/system/vendor/lib/modules/ \;
-          find out/ -name "camera.ko" -exec cp {} MagiskModule/system/vendor/lib/modules/ \;
-          find out/ -type f -name "*.ko" -path "out/techpack/audio/*" -exec cp {} MagiskModule/system/vendor/lib/modules/ \;
-          
-          echo "=== Magisk Module Contents ==="
-          ls -la MagiskModule/system/vendor/lib/modules/
+          find out/ -name "lib80211*.ko" -exec cp {} AnyKernel3/modules/ \;
+          echo "=== Собранные модули ==="
+          ls -la AnyKernel3/modules/ || echo "Нет модулей"
 
-      - name: Package Zips
+      - name: Package with AnyKernel3
         run: |
-          # Package AnyKernel3
           cp out/arch/arm64/boot/Image AnyKernel3/
           cd AnyKernel3
           zip -r9 ../NetHunter-Kernel-oscar.zip *
-          cd ..
-          
-          # Package Magisk Module
-          cd MagiskModule
-          zip -r9 ../NetHunter-Vendor-Modules.zip *
-          cd ..
           
       - name: Upload build log on failure
         if: failure()
@@ -159,14 +116,8 @@ jobs:
           name: kernel-config
           path: out/.config
 
-      - name: Upload Kernel Artifact
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: NetHunter-Kernel-oscar
           path: NetHunter-Kernel-oscar.zip
-
-      - name: Upload Magisk Module Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: NetHunter-Vendor-Modules
-          path: NetHunter-Vendor-Modules.zip
