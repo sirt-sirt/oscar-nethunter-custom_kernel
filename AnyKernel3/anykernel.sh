@@ -14,13 +14,14 @@ device.name1=oscar
 device.name2=RMX3471
 device.name3=RMX3472
 device.name4=holi
-supported.versions=
-supported.patchlevels=
+device.name5=RE54CBL1
+device.name6=RMX3472 (RE54CBL1)
 '; } # end properties
 
 # shell variables
-block=boot;
-is_slot_device=1;
+block=/dev/block/by-name/boot_a;
+BLOCK=/dev/block/by-name/boot_a;
+is_slot_device=0;
 ramdisk_compression=auto;
 patch_vbmeta_flag=auto;
 
