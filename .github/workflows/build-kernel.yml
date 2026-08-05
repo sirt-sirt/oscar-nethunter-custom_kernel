@@ -49,11 +49,28 @@ jobs:
             CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
             vendor/holi-qgki_defconfig
           
-          # Compile Image
           make O=out ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1 \
             CROSS_COMPILE=aarch64-linux-gnu- \
             CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
             -j$(nproc) 2>&1 | tee build.log
+
+      - name: Diagnostic Info
+        run: |
+          echo "========================================="
+          echo "         DIAGNOSTIC INFORMATION          "
+          echo "========================================="
+          echo "1. include/config/kernel.release:"
+          cat out/include/config/kernel.release || echo "Not found"
+          echo ""
+          echo "2. Strings from Image (Linux version):"
+          strings out/arch/arm64/boot/Image | grep "Linux version" || echo "Not found"
+          echo ""
+          echo "3. CONFIG_MODVERSIONS in .config:"
+          grep "CONFIG_MODVERSIONS" out/.config || echo "Not found"
+          echo ""
+          echo "4. CONFIG_LOCALVERSION in .config:"
+          grep "CONFIG_LOCALVERSION" out/.config || echo "Not found"
+          echo "========================================="
 
       - name: Print real errors
         if: failure()
@@ -92,6 +109,12 @@ jobs:
         with:
           name: build-log
           path: build.log
+
+      - name: Upload .config Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-config
+          path: out/.config
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
