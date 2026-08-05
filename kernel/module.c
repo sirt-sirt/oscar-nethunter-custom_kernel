@@ -4729,3 +4729,16 @@ void module_layout(struct module *mod,
 }
 EXPORT_SYMBOL(module_layout);
 #endif
+
+#ifndef CONFIG_CFI_CLANG
+/* DUMMY CFI HANDLERS TO SATISFY STOCK VENDOR MODULES COMPILED WITH LTO & CFI ENABLED */
+void __cfi_slowpath(uint64_t id, void *ptr, void *diag)
+{
+}
+EXPORT_SYMBOL(__cfi_slowpath);
+
+void __cfi_check_fail(void *data, void *ptr)
+{
+}
+EXPORT_SYMBOL(__cfi_check_fail);
+#endif
