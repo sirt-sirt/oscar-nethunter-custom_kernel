@@ -953,11 +953,8 @@ CONFIG_CORESIGHT_TGU=y
 # ================================================================
 
 # --- SysVIPC (PostgreSQL/SQLite � NetHunter chroot) ---
-CONFIG_SYSVIPC=y
-CONFIG_SYSVIPC_SYSCTL=y
 
 # --- Namespaces (������ �������� chroot) ---
-CONFIG_PID_NS=y
 CONFIG_NET_NS=y
 CONFIG_USER_NS=y
 CONFIG_IPC_NS=y
