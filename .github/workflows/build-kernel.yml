@@ -40,6 +40,9 @@ jobs:
           export STRIP=llvm-strip
           export ARCH=arm64
           
+          # Prevent setlocalversion from appending git hash
+          touch .scmversion
+          
           # Build defconfig
           make O=out ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1 \
             CROSS_COMPILE=aarch64-linux-gnu- \
