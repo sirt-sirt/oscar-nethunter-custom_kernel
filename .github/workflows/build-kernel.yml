@@ -27,6 +27,28 @@ env:
   LLVM: 1
   LLVM_IAS: 1
 
+  # Run 32484342984 produced "5.4.280-qgki+" where the phone needs
+  # "5.4.280-qgki-ge408f03a5c42". That trailing plus sign is only reachable on
+  # the CONFIG_LOCALVERSION_AUTO != y branch of scripts/setlocalversion:
+  #
+  #   if test "$CONFIG_LOCALVERSION_AUTO" = "y"; then
+  #     res="$res$(scm_version)"           # this is what reads .scmversion
+  #   else
+  #     if test "${LOCALVERSION+set}" != "set"; then
+  #       scm=$(scm_version --short)
+  #       res="$res${scm:++}"              # <- the plus sign
+  #     fi
+  #   fi
+  #
+  # So CONFIG_LOCALVERSION_AUTO=y did not survive olddefconfig and .scmversion
+  # was never consulted at all. Rather than keep fighting for that symbol, the
+  # release string is now spelled out in CONFIG_LOCALVERSION and LOCALVERSION
+  # is exported as an empty string, which is exactly what suppresses the plus.
+  # This lands on the right answer whether that symbol ends up off or absent
+  # entirely, and it no longer depends on git state or on .scmversion existing.
+  LOCALVERSION: ""
+  EXPECTED_LOCALVERSION: "-qgki-ge408f03a5c42"
+
   # The phone's stock vendor modules carry this exact string. Reproducing it
   # byte for byte is what lets rdbg.ko keep loading - that is the one module
   # whose source was never located in this tree, so it stays stock. Everything
@@ -35,7 +57,6 @@ env:
   # them with an unconditional obj-m, so their CRCs match by construction.
   EXPECTED_RELEASE: "5.4.280-qgki-ge408f03a5c42"
   EXPECTED_VERMAGIC: "5.4.280-qgki-ge408f03a5c42 SMP preempt mod_unload modversions aarch64"
-  SCMVERSION: "-ge408f03a5c42"
 
   KBUILD_BUILD_USER: nethunter
   KBUILD_BUILD_HOST: builder
@@ -136,76 +157,118 @@ jobs:
       - name: Configure
         run: |
           set -eu
-          # scripts/setlocalversion reads .scmversion only from scm_version(),
-          # and scm_version() is only called when CONFIG_LOCALVERSION_AUTO=y.
-          # The fragment forces that symbol on - without it this file is
-          # ignored and the release comes out as plain 5.4.280-qgki.
-          printf '%s' "$SCMVERSION" > .scmversion
+          export LOCALVERSION=""
 
           make -j"$(nproc)" O=out ARCH=arm64 $KTC "$DEFCONFIG"
-          # Invoked through bash on purpose: the script is executable by the
-          # step above, but this way the config still merges even if that ever
-          # regresses.
-          ARCH=arm64 bash scripts/kconfig/merge_config.sh -m -O out out/.config "$FRAGMENT"
+
+          # The release string is pinned from this file rather than from the
+          # tracked fragment, so fixing it stays a one-file change. The
+          # fragment still carries the older CONFIG_LOCALVERSION="-qgki" and
+          # CONFIG_LOCALVERSION_AUTO=y pair. merge_config.sh applies fragments
+          # left to right and the last one wins, so this overrides it on
+          # purpose and will print a "redefined by fragment" notice for both
+          # symbols. That notice is expected, not a problem.
+          printf '%s\n' \
+            "CONFIG_LOCALVERSION=\"$EXPECTED_LOCALVERSION\"" \
+            '# CONFIG_LOCALVERSION_AUTO is not set' \
+            > /tmp/release.config
+          echo "=== release pins ==="
+          cat /tmp/release.config
+
+          ARCH=arm64 bash scripts/kconfig/merge_config.sh -m -O out \
+            out/.config "$FRAGMENT" /tmp/release.config
           make -j"$(nproc)" O=out ARCH=arm64 $KTC olddefconfig
 
-          # If clang was not detected here then LTO_CLANG and CFI_CLANG are not
-          # merely off, they are unavailable, and the gate below cannot tell you
-          # why. Print the evidence while we still have it.
           echo "=== toolchain as Kconfig resolved it ==="
           grep -E '^(# )?CONFIG_(CC_IS_CLANG|CLANG_VERSION|CC_IS_GCC|GCC_VERSION|LD_IS_LLD|LD_VERSION)\b' out/.config || true
+
+          # CONFIG_LOCALVERSION_AUTO=y was requested and vanished, which raises
+          # the obvious question of what else vanishes. This lists every
+          # positive symbol the fragment asks for that is not in the resolved
+          # config. Empty means everything survived. A long list means the
+          # fragment is not being applied the way we think it is, and the symbol
+          # checks in the next step would all be lying about the cause.
+          # CONFIG_LOCALVERSION is skipped because it is overridden just above.
+          echo "=== fragment symbols dropped by olddefconfig ==="
+          dropped=$(grep -E '^CONFIG_[A-Za-z0-9_]+=' "$FRAGMENT" \
+            | grep -v '^CONFIG_LOCALVERSION=' \
+            | while IFS= read -r line; do
+                grep -qxF "$line" out/.config || echo "$line"
+              done)
+          if [ -n "$dropped" ]; then
+            printf '%s\n' "$dropped" | sed 's/^/  DROPPED: /'
+            echo "  total dropped: $(printf '%s\n' "$dropped" | wc -l)"
+          else
+            echo "  none - every symbol the fragment asked for survived"
+          fi
 
       - name: Gate - release string and critical symbols
         run: |
           set -eu
+          export LOCALVERSION=""
 
-          # ---------------------------------------------------------------
-          # This gate exists because olddefconfig SILENTLY DISCARDS any symbol
-          # whose dependencies are not met. A discarded symbol means a module
-          # that is never built, and that only surfaces much later as "Wi-Fi
-          # will not turn on". Fail in 30 seconds instead of after a 40 minute
-          # build, a flash and a bootloop.
-          # ---------------------------------------------------------------
+          fail=0
+
           rel=$(make -s O=out ARCH=arm64 $KTC kernelrelease 2>/dev/null | tail -1)
           echo "kernelrelease  : $rel"
           echo "device expects : $EXPECTED_RELEASE"
           if [ "$rel" != "$EXPECTED_RELEASE" ]; then
             echo "::error::release mismatch - every stock vendor module would be refused."
-            echo "Check CONFIG_LOCALVERSION, CONFIG_LOCALVERSION_AUTO=y and .scmversion."
-            exit 1
+            fail=1
           fi
 
-          fail=0
+          # Deliberately no exit here. Every failed run costs a round trip of
+          # several minutes plus a hand-pasted log, so this step reports every
+          # problem it can see and exits once, at the very end.
+
+          if [ "${LOCALVERSION+set}" != "set" ]; then
+            echo "::error::LOCALVERSION is not exported - setlocalversion would append a plus sign"
+            fail=1
+          fi
+
+          if grep -qx 'CONFIG_LOCALVERSION_AUTO=y' out/.config; then
+            echo "::error::CONFIG_LOCALVERSION_AUTO=y appends a git hash after CONFIG_LOCALVERSION"
+            fail=1
+          else
+            echo "  ok      CONFIG_LOCALVERSION_AUTO is off, as intended"
+          fi
+
           check() {
-            if grep -qx "CONFIG_$1=$2" out/.config; then
-              echo "  ok    CONFIG_$1 = $2"
-            else
-              got=$(grep -E "^(CONFIG_$1=|# CONFIG_$1 is not set)" out/.config || echo '<absent>')
+            if ! grep -qx "CONFIG_$1=$2" out/.config; then
+              got=$(grep -E "^(# )?CONFIG_$1[ =]" out/.config || echo "absent")
               echo "::error::CONFIG_$1 should be $2 but is: $got"
               fail=1
+            else
+              echo "  ok      CONFIG_$1=$2"
             fi
           }
 
-          # vermagic tokens: <release> SMP preempt mod_unload modversions aarch64
+          check LOCALVERSION "\"$EXPECTED_LOCALVERSION\""
+
+          # These four spell out the second half of the vermagic string.
           check SMP y
           check PREEMPT y
           check MODULE_UNLOAD y
           check MODVERSIONS y
-          check LOCALVERSION_AUTO y
 
-          # Kali chroot
+          # The Kali chroot needs these. HEAD dropped SYSVIPC and PID_NS trying
+          # to cure the bootloop, which was a misdiagnosis - the bootloop came
+          # from the forced CRC and vermagic acceptance in kernel/module.c.
           check SYSVIPC y
           check IPC_NS y
           check PID_NS y
           check NAMESPACES y
 
-          # ABI shape - must match the stock modules we keep
+          # CFI must survive: stock rdbg.ko references __cfi_slowpath, and it is
+          # the one module in modules.load that is not rebuilt here. CFI_CLANG
+          # depends on LTO_CLANG, which in turn needs clang plus ld.lld, which
+          # is why the toolchain is pinned in env rather than left to default.
           check LTO_CLANG y
           check CFI_CLANG y
 
-          # Wi-Fi. CONFIG_QCA_CLD_WLAN is declared inside an "if STAGING"
-          # block in drivers/staging/Kconfig, so STAGING=y is what makes the
-          # symbol exist at all. Without it the driver is dropped in silence.
+          # Wi-Fi: the in-tree qcacld-3.0 driver, its dependencies, and the
+          # platform glue the phone's firmware in /vendor/firmware/wlan/qca_cld
+          # is loaded through.
           check STAGING y
           check QCA_CLD_WLAN m
           check CFG80211 y
@@ -214,16 +277,14 @@ jobs:
           check CNSS_GENL y
           check WCNSS_MEM_PRE_ALLOC y
 
-          # Bluetooth. BTFM_SLIM depends on MSM_BT_POWER, MSM_BT_POWER depends
-          # on ARCH_QCOM, and both sit in a menu that depends on BT.
+          # Bluetooth: btpower.ko and bt_fm_slim.ko are both in modules.load,
+          # and bt_fm_slim needs the SLIMbus core built in.
           check BT y
           check ARCH_QCOM y
           check MSM_BT_POWER m
           check BTFM_SLIM m
           check SLIMBUS y
 
-          echo "profile : $(grep '^CONFIG_QCA_CLD_WLAN_PROFILE=' out/.config || echo '<absent>')"
-          echo "localver: $(grep '^CONFIG_LOCALVERSION=' out/.config || echo '<absent>')"
           exit "$fail"
 
       - name: Export a standalone defconfig
