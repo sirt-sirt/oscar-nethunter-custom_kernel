@@ -11,13 +11,19 @@ env:
   DEFCONFIG: vendor/holi-qgki_defconfig
   FRAGMENT: arch/arm64/configs/vendor/nethunter_oscar.config
 
-  # MUST apply to EVERY make invocation, not only the build. Kconfig resolves
-  # CC_IS_CLANG and LD_IS_LLD while olddefconfig runs, and arch/Kconfig gates
-  # LTO_CLANG on both of them. Configure with the default gcc and the LTO
-  # choice silently collapses to LTO_NONE, CFI_CLANG vanishes with it, and the
-  # gate then dies on 'CONFIG_LTO_CLANG should be y'. That is exactly how the
-  # 2 minute failure on run 32481952672 happened. CFI has to stay on, because
-  # stock rdbg.ko references __cfi_slowpath.
+  # ONE definition of the toolchain, shared by every make in this file.
+  # Configure and Build must see the identical compiler, otherwise the config
+  # we gate on is not the config we build. Kconfig resolves CC_IS_CLANG,
+  # CLANG_VERSION and LD_IS_LLD while olddefconfig runs, and arch/Kconfig gates
+  # LTO_CLANG on all three at once. Configure with the default gcc and the LTO
+  # choice silently collapses to LTO_NONE, taking CFI_CLANG down with it. CFI
+  # has to stay on, because stock rdbg.ko references __cfi_slowpath.
+  KTC: >-
+    LLVM=1 LLVM_IAS=1
+    CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm
+    OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip
+    CROSS_COMPILE=aarch64-linux-gnu-
+    CROSS_COMPILE_ARM32=arm-linux-gnueabi-
   LLVM: 1
   LLVM_IAS: 1
 
@@ -42,6 +48,59 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
+
+      - name: Restore the executable bit on the build scripts
+        run: |
+          set -eu
+          # ---------------------------------------------------------------
+          # This is what killed runs 32481952672 and 32482784430 after ~2 min:
+          #   sh: 1: ../scripts/gcc-version.sh: Permission denied
+          #   init/Kconfig:35: syntax error
+          #   make[2]: *** [vendor/holi-qgki_defconfig] Error 1
+          #
+          # Every blob in this repository is stored with mode 100644, so the
+          # helper scripts Kconfig executes directly are not executable after
+          # checkout. init/Kconfig contains
+          #   default $(shell,$(srctree)/scripts/gcc-version.sh $(CC)) if CC_IS_GCC
+          # and when the script cannot run the expansion comes back empty, so
+          # the line degenerates into "default  if CC_IS_GCC" - hence the syntax
+          # error on the very first make, long before any gate can run.
+          #
+          # The mode is wrong in the tree itself and cannot be corrected through
+          # the API these files are pushed with, so it is repaired on every
+          # checkout. The same repair for a local clone is:
+          #   find . -name '*.sh' -exec chmod +x {} +
+          # ---------------------------------------------------------------
+          find . -path ./.git -prune -o -type f \
+            \( -name '*.sh' -o -name '*.pl' -o -name '*.py' \) \
+            -exec chmod +x {} +
+
+          # Extensionless helpers under scripts/ - anything with a shebang.
+          find scripts -type f | while read -r f; do
+            if [ "$(head -c 2 "$f" 2>/dev/null)" = '#!' ]; then
+              chmod +x "$f"
+            fi
+          done
+
+          # Named one by one because Kconfig and the final link invoke these by
+          # path, and a silent miss here costs an entire build.
+          fail=0
+          for f in scripts/gcc-version.sh scripts/clang-version.sh \
+                   scripts/gcc-plugin.sh scripts/ld-version.sh \
+                   scripts/tools-support-relr.sh scripts/cc-can-link.sh \
+                   scripts/setlocalversion scripts/mkcompile_h \
+                   scripts/link-vmlinux.sh scripts/depmod.sh \
+                   scripts/kconfig/merge_config.sh; do
+            if [ ! -e "$f" ]; then
+              echo "  absent  $f"
+            elif [ -x "$f" ]; then
+              echo "  ok +x   $f"
+            else
+              echo "::error::$f is still not executable"
+              fail=1
+            fi
+          done
+          exit "$fail"
 
       - name: Install build dependencies
         run: |
@@ -82,9 +141,19 @@ jobs:
           # The fragment forces that symbol on - without it this file is
           # ignored and the release comes out as plain 5.4.280-qgki.
           printf '%s' "$SCMVERSION" > .scmversion
-          make -j"$(nproc)" O=out ARCH=arm64 "$DEFCONFIG"
-          ARCH=arm64 scripts/kconfig/merge_config.sh -m -O out out/.config "$FRAGMENT"
-          make -j"$(nproc)" O=out ARCH=arm64 olddefconfig
+
+          make -j"$(nproc)" O=out ARCH=arm64 $KTC "$DEFCONFIG"
+          # Invoked through bash on purpose: the script is executable by the
+          # step above, but this way the config still merges even if that ever
+          # regresses.
+          ARCH=arm64 bash scripts/kconfig/merge_config.sh -m -O out out/.config "$FRAGMENT"
+          make -j"$(nproc)" O=out ARCH=arm64 $KTC olddefconfig
+
+          # If clang was not detected here then LTO_CLANG and CFI_CLANG are not
+          # merely off, they are unavailable, and the gate below cannot tell you
+          # why. Print the evidence while we still have it.
+          echo "=== toolchain as Kconfig resolved it ==="
+          grep -E '^(# )?CONFIG_(CC_IS_CLANG|CLANG_VERSION|CC_IS_GCC|GCC_VERSION|LD_IS_LLD|LD_VERSION)\b' out/.config || true
 
       - name: Gate - release string and critical symbols
         run: |
@@ -97,7 +166,7 @@ jobs:
           # will not turn on". Fail in 30 seconds instead of after a 40 minute
           # build, a flash and a bootloop.
           # ---------------------------------------------------------------
-          rel=$(make -s O=out ARCH=arm64 kernelrelease 2>/dev/null | tail -1)
+          rel=$(make -s O=out ARCH=arm64 $KTC kernelrelease 2>/dev/null | tail -1)
           echo "kernelrelease  : $rel"
           echo "device expects : $EXPECTED_RELEASE"
           if [ "$rel" != "$EXPECTED_RELEASE" ]; then
@@ -163,7 +232,7 @@ jobs:
           # The fully resolved self-contained config: base defconfig plus our
           # fragment, minimised by kconfig itself. Downloadable from the run
           # artifacts as nethunter_oscar_defconfig.
-          make -j"$(nproc)" O=out ARCH=arm64 savedefconfig
+          make -j"$(nproc)" O=out ARCH=arm64 $KTC savedefconfig
           cp out/defconfig nethunter_oscar_defconfig
           echo "standalone defconfig: $(wc -l < nethunter_oscar_defconfig) lines"
 
@@ -175,12 +244,7 @@ jobs:
       - name: Build kernel and in-tree modules
         run: |
           set -eu
-          make -j"$(nproc)" O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 \
-            CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm \
-            OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip \
-            CROSS_COMPILE=aarch64-linux-gnu- \
-            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
-            Image modules
+          make -j"$(nproc)" O=out ARCH=arm64 $KTC Image modules
 
       # External RTL8188EUS for the TP-Link TL-WN722N v2, the only adapter here
       # that can do monitor mode and injection. Out-of-tree drivers regularly
@@ -192,13 +256,13 @@ jobs:
           set -eu
           git clone --depth=1 https://github.com/aircrack-ng/rtl8188eus.git rtl8188eus
           make -j"$(nproc)" -C rtl8188eus \
-            KSRC="$PWD/out" ARCH=arm64 LLVM=1 CC=clang \
+            KSRC="$PWD/out" ARCH=arm64 $KTC \
             CONFIG_PLATFORM_I386_PC=n CONFIG_PLATFORM_ANDROID_ARM64=y
 
       - name: Install and package modules
         run: |
           set -eu
-          make O=out ARCH=arm64 LLVM=1 CC=clang \
+          make O=out ARCH=arm64 $KTC \
             INSTALL_MOD_PATH="$PWD/modinstall" INSTALL_MOD_STRIP=1 modules_install
 
           DEST=AnyKernel3/modules/vendor/lib/modules
@@ -247,7 +311,7 @@ jobs:
           echo "built  : $got"
           echo "device : $EXPECTED_VERMAGIC"
           if [ "$got" != "$EXPECTED_VERMAGIC" ]; then
-            echo "::error::vermagic mismatch - the stock rmnet and rdbg modules would be refused, no mobile data."
+            echo "::error::vermagic mismatch - the stock rdbg module would be refused."
             exit 1
           fi
 
@@ -255,63 +319,50 @@ jobs:
         run: |
           set -eu
           DEST=AnyKernel3/modules/vendor/lib/modules
-          cat > /tmp/device_modules.txt <<'EOF'
-          adsp_loader_dlkm
-          apr_dlkm
-          aw87xxx_dlkm
-          aw882xx_dlkm
-          bolero_cdc_dlkm
-          bt_fm_slim
-          btpower
-          camera
-          machine_dlkm
-          mbhc_dlkm
-          native_dlkm
-          pa_manager_dlkm
-          pinctrl_lpi_dlkm
-          platform_dlkm
-          q6_dlkm
-          q6_notifier_dlkm
-          q6_pdr_dlkm
-          qca_cld3_wlan
-          rdbg
-          rmnet_core
-          rmnet_ctl
-          rmnet_offload
-          rmnet_shs
-          rx_macro_dlkm
-          sia81xx_dlkm
-          snd_event_dlkm
-          stub_dlkm
-          swr_ctrl_dlkm
-          swr_dlkm
-          tfa98xx-v6_dlkm
-          tx_macro_dlkm
-          va_macro_dlkm
-          wcd937x_dlkm
-          wcd937x_slave_dlkm
-          wcd938x_dlkm
-          wcd938x_slave_dlkm
-          wcd9xxx_dlkm
-          wcd_core_dlkm
-          wsa881x_analog_dlkm
-          EOF
+
+          # The exact contents of /vendor/lib/modules on the phone, 39 modules.
+          # A word list and deliberately NOT a here-document: a heredoc body
+          # inside a YAML block scalar has to be indented, which indents its
+          # terminator too, which bash then never matches. The heredoc swallowed
+          # the remainder of this step and it passed without checking anything,
+          # and "bash -n" only warns about that, it does not fail. A
+          # verification step that cannot fail is worse than none at all.
+          DEVICE_MODULES="
+          adsp_loader_dlkm apr_dlkm aw87xxx_dlkm aw882xx_dlkm bolero_cdc_dlkm
+          bt_fm_slim btpower camera machine_dlkm mbhc_dlkm native_dlkm
+          pa_manager_dlkm pinctrl_lpi_dlkm platform_dlkm q6_dlkm
+          q6_notifier_dlkm q6_pdr_dlkm qca_cld3_wlan rdbg rmnet_core rmnet_ctl
+          rmnet_offload rmnet_shs rx_macro_dlkm sia81xx_dlkm snd_event_dlkm
+          stub_dlkm swr_ctrl_dlkm swr_dlkm tfa98xx-v6_dlkm tx_macro_dlkm
+          va_macro_dlkm wcd937x_dlkm wcd937x_slave_dlkm wcd938x_dlkm
+          wcd938x_slave_dlkm wcd9xxx_dlkm wcd_core_dlkm wsa881x_analog_dlkm
+          "
 
           echo "=== device /vendor/lib/modules vs this build ==="
-          while read -r m; do
-            [ -n "$m" ] || continue
+          built=0
+          stock=0
+          total=0
+          for m in $DEVICE_MODULES; do
+            total=$((total + 1))
             if [ -f "$DEST/$m.ko" ]; then
               echo "  built  $m.ko"
+              built=$((built + 1))
             else
               echo "  STOCK  $m.ko  (kept - relies on matching vermagic)"
+              stock=$((stock + 1))
             fi
-          done < /tmp/device_modules.txt
+          done
+          echo "counted $total device modules: $built rebuilt, $stock left stock"
+          if [ "$total" != "39" ]; then
+            echo "::error::inventory list holds $total entries, expected 39 - typo in the list"
+            exit 1
+          fi
 
           # These decide whether Wi-Fi, Bluetooth, the camera and mobile data
-          # work at all. If any is missing the zip is not worth flashing.
-          # The rmnet four live in techpack/datarmnet/core and
-          # techpack/datarmnet-ext/{offload,shs} behind an unconditional
-          # obj-m, so a miss here means techpack never got descended into.
+          # work at all. If any is missing the zip is not worth flashing. The
+          # rmnet four come from techpack/datarmnet/core and
+          # techpack/datarmnet-ext/{offload,shs} behind an unconditional obj-m,
+          # so a miss there means techpack was never descended into.
           missing=0
           for m in qca_cld3_wlan btpower bt_fm_slim camera \
                    rmnet_core rmnet_ctl rmnet_offload rmnet_shs; do
@@ -339,7 +390,8 @@ jobs:
       # Inspects the finished artifact exactly the way it gets inspected before
       # flashing. Reported, not enforced: the hard gates above already stop a
       # genuinely broken build, and one absent vendor amplifier module must not
-      # throw away an otherwise good kernel.
+      # throw away an otherwise good kernel. Read this step's log before you
+      # flash anything.
       - name: Verify the finished zip
         continue-on-error: true
         run: |
