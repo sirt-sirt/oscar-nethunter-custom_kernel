@@ -11,9 +11,22 @@ env:
   DEFCONFIG: vendor/holi-qgki_defconfig
   FRAGMENT: arch/arm64/configs/vendor/nethunter_oscar.config
 
+  # MUST apply to EVERY make invocation, not only the build. Kconfig resolves
+  # CC_IS_CLANG and LD_IS_LLD while olddefconfig runs, and arch/Kconfig gates
+  # LTO_CLANG on both of them. Configure with the default gcc and the LTO
+  # choice silently collapses to LTO_NONE, CFI_CLANG vanishes with it, and the
+  # gate then dies on 'CONFIG_LTO_CLANG should be y'. That is exactly how the
+  # 2 minute failure on run 32481952672 happened. CFI has to stay on, because
+  # stock rdbg.ko references __cfi_slowpath.
+  LLVM: 1
+  LLVM_IAS: 1
+
   # The phone's stock vendor modules carry this exact string. Reproducing it
-  # byte for byte is what lets the five modules we cannot build from this tree
-  # (rmnet_core, rmnet_ctl, rmnet_offload, rmnet_shs, rdbg) keep loading.
+  # byte for byte is what lets rdbg.ko keep loading - that is the one module
+  # whose source was never located in this tree, so it stays stock. Everything
+  # else in modules.load is rebuilt here, the four rmnet modules included:
+  # techpack/datarmnet/core and techpack/datarmnet-ext/{offload,shs} declare
+  # them with an unconditional obj-m, so their CRCs match by construction.
   EXPECTED_RELEASE: "5.4.280-qgki-ge408f03a5c42"
   EXPECTED_VERMAGIC: "5.4.280-qgki-ge408f03a5c42 SMP preempt mod_unload modversions aarch64"
   SCMVERSION: "-ge408f03a5c42"
@@ -294,10 +307,14 @@ jobs:
             fi
           done < /tmp/device_modules.txt
 
-          # These four decide whether Wi-Fi, Bluetooth and the camera work at
-          # all. If any is missing the zip is not worth flashing.
+          # These decide whether Wi-Fi, Bluetooth, the camera and mobile data
+          # work at all. If any is missing the zip is not worth flashing.
+          # The rmnet four live in techpack/datarmnet/core and
+          # techpack/datarmnet-ext/{offload,shs} behind an unconditional
+          # obj-m, so a miss here means techpack never got descended into.
           missing=0
-          for m in qca_cld3_wlan btpower bt_fm_slim camera; do
+          for m in qca_cld3_wlan btpower bt_fm_slim camera \
+                   rmnet_core rmnet_ctl rmnet_offload rmnet_shs; do
             if [ ! -f "$DEST/$m.ko" ]; then
               echo "::error::$m.ko was not built - the matching feature would be dead"
               missing=1
@@ -318,6 +335,17 @@ jobs:
           cp out/arch/arm64/boot/Image AnyKernel3/Image
           cd AnyKernel3
           zip -r9 "../NetHunter-Kernel-oscar-$(date -u +%Y%m%d-%H%M).zip" . -x '.git/*'
+
+      # Inspects the finished artifact exactly the way it gets inspected before
+      # flashing. Reported, not enforced: the hard gates above already stop a
+      # genuinely broken build, and one absent vendor amplifier module must not
+      # throw away an otherwise good kernel.
+      - name: Verify the finished zip
+        continue-on-error: true
+        run: |
+          set -eu
+          z=$(ls -1 NetHunter-Kernel-oscar-*.zip | head -1)
+          bash nethunter-verify-zip.sh "$z"
 
       - name: Report kernel identity
         run: |
