@@ -322,7 +322,50 @@ jobs:
       - name: Build kernel and in-tree modules
         run: |
           set -eu
-          make -j"$(nproc)" O=out ARCH=arm64 $KTC Image modules
+          set -o pipefail
+
+          # The log is piped through tee so a failure can report itself. Run
+          # 32511775897 ended at log line 2150 with nothing but
+          #   make: *** [Makefile:190: sub-make] Error 2
+          # at the tail. With -j the failing recipe's diagnostic is buried
+          # hundreds of lines up, because make lets the jobs already in flight
+          # finish before giving up - which is why fs/ appeared to compile fine
+          # right before the failure. Hand-reading a 2000-line log to find the
+          # real message is not a workflow, so the step digs it out itself.
+          rc=0
+          make -j"$(nproc)" O=out ARCH=arm64 $KTC Image modules 2>&1 \
+            | tee /tmp/build.log || rc=$?
+
+          if [ "$rc" != "0" ]; then
+            echo "##################################################"
+            echo "### build failed, rc=$rc - digging out the cause"
+            echo "##################################################"
+
+            echo "=== compiler and linker diagnostics ==="
+            grep -nE ' (error|fatal error):|^ld\.lld: error:|undefined (symbol|reference)|relocation .* (out of range|truncated)|cannot find' \
+              /tmp/build.log | head -60 || echo "  nothing matched"
+
+            echo "=== make failure lines ==="
+            grep -nE '^make(\[[0-9]+\])?: \*\*\*' /tmp/build.log | head -30 || true
+
+            echo "=== context around the first diagnostic ==="
+            n=$(grep -nE ' (error|fatal error):|^ld\.lld: error:' /tmp/build.log \
+              | head -1 | cut -d: -f1 || true)
+            if [ -n "${n:-}" ]; then
+              s=1
+              [ "$n" -gt 40 ] && s=$((n - 40))
+              sed -n "${s},$((n + 40))p" /tmp/build.log
+            else
+              echo "  no diagnostic matched - last 150 lines instead:"
+              tail -150 /tmp/build.log
+            fi
+
+            echo "=== log was $(wc -l < /tmp/build.log) lines ==="
+            exit "$rc"
+          fi
+
+          echo "Image  : $(stat -c %s out/arch/arm64/boot/Image) bytes"
+          echo "modules: $(find out -name '*.ko' | wc -l) built"
 
       # External RTL8188EUS for the TP-Link TL-WN722N v2, the only adapter here
       # that can do monitor mode and injection. Out-of-tree drivers regularly
