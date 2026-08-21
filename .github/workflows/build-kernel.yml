@@ -27,27 +27,28 @@ env:
   LLVM: 1
   LLVM_IAS: 1
 
-  # Run 32484342984 produced "5.4.280-qgki+" where the phone needs
-  # "5.4.280-qgki-ge408f03a5c42". That trailing plus sign is only reachable on
-  # the CONFIG_LOCALVERSION_AUTO != y branch of scripts/setlocalversion:
+  # Run 32503060142 is what pinned this down. The gate verified that
+  # out/.config held CONFIG_LOCALVERSION="-qgki-ge408f03a5c42", and
+  # kernelrelease still came back "5.4.280-qgki". So scripts/setlocalversion
+  # does not read .config at all. It does
+  #   . include/config/auto.conf
+  # and auto.conf is a mirror written by syncconfig, which was stale relative
+  # to the merged .config. The earlier reading of this - "olddefconfig dropped
+  # CONFIG_LOCALVERSION_AUTO" - was wrong. The fragment applied fine; the file
+  # the script actually reads was simply out of date.
   #
-  #   if test "$CONFIG_LOCALVERSION_AUTO" = "y"; then
-  #     res="$res$(scm_version)"           # this is what reads .scmversion
-  #   else
-  #     if test "${LOCALVERSION+set}" != "set"; then
-  #       scm=$(scm_version --short)
-  #       res="$res${scm:++}"              # <- the plus sign
-  #     fi
-  #   fi
-  #
-  # So CONFIG_LOCALVERSION_AUTO=y did not survive olddefconfig and .scmversion
-  # was never consulted at all. Rather than keep fighting for that symbol, the
-  # release string is now spelled out in CONFIG_LOCALVERSION and LOCALVERSION
-  # is exported as an empty string, which is exactly what suppresses the plus.
-  # This lands on the right answer whether that symbol ends up off or absent
-  # entirely, and it no longer depends on git state or on .scmversion existing.
-  LOCALVERSION: ""
-  EXPECTED_LOCALVERSION: "-qgki-ge408f03a5c42"
+  # setlocalversion builds the string as
+  #   res="${res}${CONFIG_LOCALVERSION}${LOCALVERSION}"
+  # so the hash now travels in the LOCALVERSION environment variable, which no
+  # file staleness can touch, while CONFIG_LOCALVERSION stays at "-qgki" - the
+  # value the base defconfig and the fragment both already carry. Stale or
+  # fresh, auto.conf yields "-qgki" either way, so the answer is identical:
+  #   5.4.280 + -qgki + -ge408f03a5c42
+  # Exporting LOCALVERSION also suppresses the trailing plus sign, and run
+  # 32484342984 proved the mechanism reaches the script: that run exported an
+  # empty LOCALVERSION and the plus sign disappeared.
+  LOCALVERSION: "-ge408f03a5c42"
+  EXPECTED_CONFIG_LOCALVERSION: "-qgki"
 
   # The phone's stock vendor modules carry this exact string. Reproducing it
   # byte for byte is what lets rdbg.ko keep loading - that is the one module
@@ -157,41 +158,51 @@ jobs:
       - name: Configure
         run: |
           set -eu
-          export LOCALVERSION=""
 
           make -j"$(nproc)" O=out ARCH=arm64 $KTC "$DEFCONFIG"
 
-          # The release string is pinned from this file rather than from the
-          # tracked fragment, so fixing it stays a one-file change. The
-          # fragment still carries the older CONFIG_LOCALVERSION="-qgki" and
-          # CONFIG_LOCALVERSION_AUTO=y pair. merge_config.sh applies fragments
-          # left to right and the last one wins, so this overrides it on
-          # purpose and will print a "redefined by fragment" notice for both
-          # symbols. That notice is expected, not a problem.
-          printf '%s\n' \
-            "CONFIG_LOCALVERSION=\"$EXPECTED_LOCALVERSION\"" \
-            '# CONFIG_LOCALVERSION_AUTO is not set' \
-            > /tmp/release.config
-          echo "=== release pins ==="
-          cat /tmp/release.config
+          # Only one pin belongs here now. CONFIG_LOCALVERSION_AUTO=y would
+          # call scm_version() and append a git hash on top of the
+          # LOCALVERSION supplied from the environment, giving a doubled
+          # suffix. The fragment asks for it, this overrides it, and
+          # merge_config.sh will print a "redefined by fragment" notice for it.
+          # That notice is expected. CONFIG_LOCALVERSION itself is left exactly
+          # as the fragment and the base defconfig have it, "-qgki".
+          printf '%s\n' '# CONFIG_LOCALVERSION_AUTO is not set' > /tmp/release.config
 
           ARCH=arm64 bash scripts/kconfig/merge_config.sh -m -O out \
             out/.config "$FRAGMENT" /tmp/release.config
           make -j"$(nproc)" O=out ARCH=arm64 $KTC olddefconfig
 
+          # Force include/config/auto.conf and include/generated/autoconf.h to
+          # be rewritten from the merged .config. auto.conf is the file
+          # setlocalversion sources, and autoconf.h is what the compiler
+          # actually sees, so a stale pair means building something other than
+          # what the gate below inspects. Run 32503060142 shipped a stale
+          # auto.conf and that alone produced the wrong release string.
+          make -j"$(nproc)" O=out ARCH=arm64 $KTC syncconfig
+
+          echo "=== .config vs auto.conf on the release symbols ==="
+          grep -E '^(# )?CONFIG_LOCALVERSION' out/.config || true
+          if [ -f out/include/config/auto.conf ]; then
+            grep -E '^(# )?CONFIG_LOCALVERSION' out/include/config/auto.conf \
+              || echo "  auto.conf carries no LOCALVERSION line"
+            ls -l --time-style=+%H:%M:%S out/.config out/include/config/auto.conf
+          else
+            echo "  auto.conf absent - setlocalversion would have refused to run"
+          fi
+
           echo "=== toolchain as Kconfig resolved it ==="
           grep -E '^(# )?CONFIG_(CC_IS_CLANG|CLANG_VERSION|CC_IS_GCC|GCC_VERSION|LD_IS_LLD|LD_VERSION)\b' out/.config || true
 
-          # CONFIG_LOCALVERSION_AUTO=y was requested and vanished, which raises
-          # the obvious question of what else vanishes. This lists every
-          # positive symbol the fragment asks for that is not in the resolved
-          # config. Empty means everything survived. A long list means the
-          # fragment is not being applied the way we think it is, and the symbol
-          # checks in the next step would all be lying about the cause.
-          # CONFIG_LOCALVERSION is skipped because it is overridden just above.
+          # Every positive symbol the fragment asks for that is missing from the
+          # resolved config. Empty means everything survived. A long list means
+          # the fragment is not being applied the way we think, and the symbol
+          # checks in the next step would be lying about the cause.
+          # LOCALVERSION_AUTO is skipped because it is overridden just above.
           echo "=== fragment symbols dropped by olddefconfig ==="
           dropped=$(grep -E '^CONFIG_[A-Za-z0-9_]+=' "$FRAGMENT" \
-            | grep -v '^CONFIG_LOCALVERSION=' \
+            | grep -v '^CONFIG_LOCALVERSION_AUTO=' \
             | while IFS= read -r line; do
                 grep -qxF "$line" out/.config || echo "$line"
               done)
@@ -205,9 +216,17 @@ jobs:
       - name: Gate - release string and critical symbols
         run: |
           set -eu
-          export LOCALVERSION=""
 
           fail=0
+
+          # The hash reaches setlocalversion through this variable, not through
+          # any file, so confirm it is actually present in the environment
+          # before trusting the release string below.
+          echo "LOCALVERSION env : [${LOCALVERSION-(unset)}]"
+          if [ "${LOCALVERSION-}" != "-ge408f03a5c42" ]; then
+            echo "::error::LOCALVERSION must be -ge408f03a5c42 in the job environment"
+            fail=1
+          fi
 
           rel=$(make -s O=out ARCH=arm64 $KTC kernelrelease 2>/dev/null | tail -1)
           echo "kernelrelease  : $rel"
@@ -221,13 +240,8 @@ jobs:
           # several minutes plus a hand-pasted log, so this step reports every
           # problem it can see and exits once, at the very end.
 
-          if [ "${LOCALVERSION+set}" != "set" ]; then
-            echo "::error::LOCALVERSION is not exported - setlocalversion would append a plus sign"
-            fail=1
-          fi
-
           if grep -qx 'CONFIG_LOCALVERSION_AUTO=y' out/.config; then
-            echo "::error::CONFIG_LOCALVERSION_AUTO=y appends a git hash after CONFIG_LOCALVERSION"
+            echo "::error::CONFIG_LOCALVERSION_AUTO=y appends a git hash after LOCALVERSION"
             fail=1
           else
             echo "  ok      CONFIG_LOCALVERSION_AUTO is off, as intended"
@@ -243,7 +257,10 @@ jobs:
             fi
           }
 
-          check LOCALVERSION "\"$EXPECTED_LOCALVERSION\""
+          # Deliberately "-qgki" and not the full string: the hash comes from
+          # the environment, so this half must match what a stale auto.conf
+          # would also say, otherwise the two disagree again.
+          check LOCALVERSION "\"$EXPECTED_CONFIG_LOCALVERSION\""
 
           # These four spell out the second half of the vermagic string.
           check SMP y
