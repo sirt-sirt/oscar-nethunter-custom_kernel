@@ -138,22 +138,68 @@ jobs:
           git clone --depth=1 https://github.com/kdrag0n/proton-clang.git "$HOME/tc"
           echo "$HOME/tc/bin" >> "$GITHUB_PATH"
 
-      - name: Strip the force-accept hack from kernel/module.c
+      - name: Restore kernel/module.c from the last clean revision
         run: |
           set -eu
-          # Commit eddbb4a added two unconditional return-1 lines, one into
-          # check_version() and one into same_magic(). They make the kernel
-          # accept ANY module regardless of symbol CRCs or vermagic, so the
-          # mismatched stock vendor modules get loaded and then dereference
-          # structures whose layout they disagree about. That is the bootloop.
-          before=$(grep -c 'FORCE ACCEPT ALL' kernel/module.c || true)
-          sed -i '/FORCE ACCEPT ALL CRCS/d;/FORCE ACCEPT ALL VERMAGICS/d' kernel/module.c
-          after=$(grep -c 'FORCE ACCEPT ALL' kernel/module.c || true)
-          echo "force-accept lines: $before -> $after"
-          if [ "$after" != "0" ]; then
-            echo "::error::failed to strip the force-accept hack"
-            exit 1
+
+          # Run 32514819779 died here, 4924 log lines in:
+          #   ../kernel/module.c:1311:1: error: non-void function does not
+          #     return a value [-Werror,-Wreturn-type]
+          #   ../kernel/module.c:1338:1: error: (same)
+          #
+          # The previous step deleted the two lines
+          #   return 1; /* FORCE ACCEPT ALL CRCS */
+          #   return 1; /* FORCE ACCEPT ALL VERMAGICS */
+          # assuming commit eddbb4a had merely inserted them above the original
+          # code. Its diff confirms exactly that: two pure additions, zero
+          # deletions. Deleting them should therefore have restored the
+          # original behaviour - and the -Wreturn-type errors prove it did not,
+          # because in the current tree neither function has any other return
+          # statement left. Some later commit gutted both bodies as well, and
+          # sed cannot put back code that is no longer in the file.
+          #
+          # So take the whole file from the last revision known to be clean,
+          # the parent of eddbb4a, rather than repairing the current one. Later
+          # edits to module.c are discarded on purpose: every commit that
+          # touched this file was chasing the bootloop and made it worse.
+          CLEAN=afaab8dd8cfd1a139f0a5faea2c8e85ba9a474ea
+
+          git fetch --depth=1 origin "$CLEAN" 2>/dev/null \
+            || { git fetch --unshallow origin || true; git fetch origin "$CLEAN"; }
+          git checkout "$CLEAN" -- kernel/module.c
+
+          # Prove the restored file is the real thing and not another stub. The
+          # first two strings live inside check_version(), the third inside
+          # same_magic() - precisely the code that must exist for the kernel to
+          # refuse a module whose symbol CRCs or vermagic disagree. Asserting on
+          # content rather than on "sed exited 0" is the lesson from this run.
+          fail=0
+          for s in 'disagrees about version of symbol' \
+                   'no symbol version for' \
+                   'amagic += strcspn(amagic, " ")'; do
+            if grep -qF "$s" kernel/module.c; then
+              echo "  ok      present: $s"
+            else
+              echo "::error::restored kernel/module.c lacks: $s"
+              fail=1
+            fi
+          done
+
+          if grep -q 'FORCE ACCEPT ALL' kernel/module.c; then
+            echo "::error::the force-accept hack is still present"
+            fail=1
+          else
+            echo "  ok      no force-accept hack"
           fi
+
+          n=$(wc -l < kernel/module.c)
+          echo "  lines   $n in kernel/module.c"
+          if [ "$n" -lt 3000 ]; then
+            echo "::error::kernel/module.c is only $n lines - looks gutted"
+            fail=1
+          fi
+
+          exit "$fail"
 
       - name: Configure
         run: |
