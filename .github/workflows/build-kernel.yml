@@ -1,123 +1,335 @@
-name: Build NetHunter Kernel (oscar)
+name: Build NetHunter kernel (oscar / SM6375)
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - "fix/**"
+
+env:
+  ARCH: arm64
+  DEFCONFIG: vendor/holi-qgki_defconfig
+  FRAGMENT: arch/arm64/configs/vendor/nethunter_oscar.config
+
+  # The phone's stock vendor modules carry this exact string. Reproducing it
+  # byte for byte is what lets the five modules we cannot build from this tree
+  # (rmnet_core, rmnet_ctl, rmnet_offload, rmnet_shs, rdbg) keep loading.
+  EXPECTED_RELEASE: "5.4.280-qgki-ge408f03a5c42"
+  EXPECTED_VERMAGIC: "5.4.280-qgki-ge408f03a5c42 SMP preempt mod_unload modversions aarch64"
+  SCMVERSION: "-ge408f03a5c42"
+
+  KBUILD_BUILD_USER: nethunter
+  KBUILD_BUILD_HOST: builder
 
 jobs:
-  build-kernel:
+  build:
     runs-on: ubuntu-22.04
     steps:
-      - name: Checkout Kernel Source
+      - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
 
-      - name: Setup Environment
+      - name: Install build dependencies
         run: |
+          set -eu
           sudo apt-get update
-          sudo apt-get install -y build-essential bc gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi libssl-dev libfl-dev libelf-dev
-          sudo apt-get install -y curl git cpio flex bison
-          
-      - name: Download Proton Clang
+          sudo apt-get install -y --no-install-recommends \
+            bc bison flex make gcc git zip unzip cpio \
+            libssl-dev libelf-dev python3 python-is-python3
+
+      - name: Fetch Proton Clang
         run: |
-          git clone --depth=1 https://github.com/kdrag0n/proton-clang.git clang
-          
-      - name: Fix permissions and broken symlinks
+          set -eu
+          git clone --depth=1 https://github.com/kdrag0n/proton-clang.git "$HOME/tc"
+          echo "$HOME/tc/bin" >> "$GITHUB_PATH"
+
+      - name: Strip the force-accept hack from kernel/module.c
         run: |
-          find . -name "*.sh" -exec chmod +x {} \;
-          chmod +x scripts/kconfig/*
-          chmod -R +x AnyKernel3/
-          
-      - name: Build Kernel
+          set -eu
+          # Commit eddbb4a added two unconditional return-1 lines, one into
+          # check_version() and one into same_magic(). They make the kernel
+          # accept ANY module regardless of symbol CRCs or vermagic, so the
+          # mismatched stock vendor modules get loaded and then dereference
+          # structures whose layout they disagree about. That is the bootloop.
+          before=$(grep -c 'FORCE ACCEPT ALL' kernel/module.c || true)
+          sed -i '/FORCE ACCEPT ALL CRCS/d;/FORCE ACCEPT ALL VERMAGICS/d' kernel/module.c
+          after=$(grep -c 'FORCE ACCEPT ALL' kernel/module.c || true)
+          echo "force-accept lines: $before -> $after"
+          if [ "$after" != "0" ]; then
+            echo "::error::failed to strip the force-accept hack"
+            exit 1
+          fi
+
+      - name: Configure
         run: |
-          set -o pipefail
-          export PATH=$(pwd)/clang/bin:$PATH
-          export CROSS_COMPILE=aarch64-linux-gnu-
-          export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
-          export CC=clang
-          export AR=llvm-ar
-          export NM=llvm-nm
-          export OBJCOPY=llvm-objcopy
-          export OBJDUMP=llvm-objdump
-          export STRIP=llvm-strip
-          export ARCH=arm64
-          
-          # Prevent setlocalversion from appending git hash
-          touch .scmversion
-          
-          # Build defconfig
-          make O=out ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1 \
+          set -eu
+          # scripts/setlocalversion reads .scmversion only from scm_version(),
+          # and scm_version() is only called when CONFIG_LOCALVERSION_AUTO=y.
+          # The fragment forces that symbol on - without it this file is
+          # ignored and the release comes out as plain 5.4.280-qgki.
+          printf '%s' "$SCMVERSION" > .scmversion
+          make -j"$(nproc)" O=out ARCH=arm64 "$DEFCONFIG"
+          ARCH=arm64 scripts/kconfig/merge_config.sh -m -O out out/.config "$FRAGMENT"
+          make -j"$(nproc)" O=out ARCH=arm64 olddefconfig
+
+      - name: Gate - release string and critical symbols
+        run: |
+          set -eu
+
+          # ---------------------------------------------------------------
+          # This gate exists because olddefconfig SILENTLY DISCARDS any symbol
+          # whose dependencies are not met. A discarded symbol means a module
+          # that is never built, and that only surfaces much later as "Wi-Fi
+          # will not turn on". Fail in 30 seconds instead of after a 40 minute
+          # build, a flash and a bootloop.
+          # ---------------------------------------------------------------
+          rel=$(make -s O=out ARCH=arm64 kernelrelease 2>/dev/null | tail -1)
+          echo "kernelrelease  : $rel"
+          echo "device expects : $EXPECTED_RELEASE"
+          if [ "$rel" != "$EXPECTED_RELEASE" ]; then
+            echo "::error::release mismatch - every stock vendor module would be refused."
+            echo "Check CONFIG_LOCALVERSION, CONFIG_LOCALVERSION_AUTO=y and .scmversion."
+            exit 1
+          fi
+
+          fail=0
+          check() {
+            if grep -qx "CONFIG_$1=$2" out/.config; then
+              echo "  ok    CONFIG_$1 = $2"
+            else
+              got=$(grep -E "^(CONFIG_$1=|# CONFIG_$1 is not set)" out/.config || echo '<absent>')
+              echo "::error::CONFIG_$1 should be $2 but is: $got"
+              fail=1
+            fi
+          }
+
+          # vermagic tokens: <release> SMP preempt mod_unload modversions aarch64
+          check SMP y
+          check PREEMPT y
+          check MODULE_UNLOAD y
+          check MODVERSIONS y
+          check LOCALVERSION_AUTO y
+
+          # Kali chroot
+          check SYSVIPC y
+          check IPC_NS y
+          check PID_NS y
+          check NAMESPACES y
+
+          # ABI shape - must match the stock modules we keep
+          check LTO_CLANG y
+          check CFI_CLANG y
+
+          # Wi-Fi. CONFIG_QCA_CLD_WLAN is declared inside an "if STAGING"
+          # block in drivers/staging/Kconfig, so STAGING=y is what makes the
+          # symbol exist at all. Without it the driver is dropped in silence.
+          check STAGING y
+          check QCA_CLD_WLAN m
+          check CFG80211 y
+          check MAC80211 y
+          check ICNSS2 y
+          check CNSS_GENL y
+          check WCNSS_MEM_PRE_ALLOC y
+
+          # Bluetooth. BTFM_SLIM depends on MSM_BT_POWER, MSM_BT_POWER depends
+          # on ARCH_QCOM, and both sit in a menu that depends on BT.
+          check BT y
+          check ARCH_QCOM y
+          check MSM_BT_POWER m
+          check BTFM_SLIM m
+          check SLIMBUS y
+
+          echo "profile : $(grep '^CONFIG_QCA_CLD_WLAN_PROFILE=' out/.config || echo '<absent>')"
+          echo "localver: $(grep '^CONFIG_LOCALVERSION=' out/.config || echo '<absent>')"
+          exit "$fail"
+
+      - name: Export a standalone defconfig
+        run: |
+          set -eu
+          # The fully resolved self-contained config: base defconfig plus our
+          # fragment, minimised by kconfig itself. Downloadable from the run
+          # artifacts as nethunter_oscar_defconfig.
+          make -j"$(nproc)" O=out ARCH=arm64 savedefconfig
+          cp out/defconfig nethunter_oscar_defconfig
+          echo "standalone defconfig: $(wc -l < nethunter_oscar_defconfig) lines"
+
+      # dtbo: this tree has no dtbo.img make target. arch/arm64/Makefile
+      # exposes only Image / Image.gz / install / vdso, and
+      # arch/arm64/boot/Makefile only Image plus compressed variants. dtbo.img
+      # comes from Android mkdtimg, not from kernel make. AnyKernel replaces
+      # the kernel only, so the stock dtbo partition stays untouched.
+      - name: Build kernel and in-tree modules
+        run: |
+          set -eu
+          make -j"$(nproc)" O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 \
+            CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm \
+            OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip \
             CROSS_COMPILE=aarch64-linux-gnu- \
             CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
-            vendor/holi-qgki_defconfig
-          
-          make O=out ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1 \
-            CROSS_COMPILE=aarch64-linux-gnu- \
-            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
-            -j$(nproc) 2>&1 | tee build.log
+            Image modules
 
-      - name: Diagnostic Info
+      # External RTL8188EUS for the TP-Link TL-WN722N v2, the only adapter here
+      # that can do monitor mode and injection. Out-of-tree drivers regularly
+      # fail against LTO/CFI, and that must not throw away a good kernel.
+      - name: Build RTL8188EUS (TL-WN722N v2)
+        id: rtl
+        continue-on-error: true
         run: |
-          echo "========================================="
-          echo "         DIAGNOSTIC INFORMATION          "
-          echo "========================================="
-          echo "1. include/config/kernel.release:"
-          cat out/include/config/kernel.release || echo "Not found"
-          echo ""
-          echo "2. Strings from Image (Linux version):"
-          strings out/arch/arm64/boot/Image | grep "Linux version" || echo "Not found"
-          echo ""
-          echo "3. CONFIG_MODVERSIONS in .config:"
-          grep "CONFIG_MODVERSIONS" out/.config || echo "Not found"
-          echo ""
-          echo "4. CONFIG_LOCALVERSION in .config:"
-          grep "CONFIG_LOCALVERSION" out/.config || echo "Not found"
-          echo "========================================="
+          set -eu
+          git clone --depth=1 https://github.com/aircrack-ng/rtl8188eus.git rtl8188eus
+          make -j"$(nproc)" -C rtl8188eus \
+            KSRC="$PWD/out" ARCH=arm64 LLVM=1 CC=clang \
+            CONFIG_PLATFORM_I386_PC=n CONFIG_PLATFORM_ANDROID_ARM64=y
 
-      - name: Print real errors
-        if: failure()
+      - name: Install and package modules
         run: |
-          echo "========================================="
-          echo "         ACTUAL ERRORS (grep)            "
-          echo "========================================="
-          grep -iE "(error[: ]|fatal|undefined reference|cannot find|no rule|FAILED)" build.log -B 3 -A 3 | tail -200 || true
-          echo "=========================================="
-          echo "         LAST 100 LINES OF BUILD LOG      "
-          echo "=========================================="
-          tail -100 build.log || true
-          
-      - name: Collect kernel modules
-        run: |
-          mkdir -p AnyKernel3/modules
-          # Собираем все скомпилированные .ko из staging и wireless
-          find out/ -name "r8188eu.ko" -exec cp {} AnyKernel3/modules/ \;
-          find out/ -name "rt2800usb.ko" -exec cp {} AnyKernel3/modules/ \;
-          find out/ -name "rt2x00lib.ko" -exec cp {} AnyKernel3/modules/ \;
-          find out/ -name "rt2x00usb.ko" -exec cp {} AnyKernel3/modules/ \;
-          find out/ -name "rtl8xxxu.ko" -exec cp {} AnyKernel3/modules/ \;
-          find out/ -name "lib80211*.ko" -exec cp {} AnyKernel3/modules/ \;
-          echo "=== Собранные модули ==="
-          ls -la AnyKernel3/modules/ || echo "Нет модулей"
+          set -eu
+          make O=out ARCH=arm64 LLVM=1 CC=clang \
+            INSTALL_MOD_PATH="$PWD/modinstall" INSTALL_MOD_STRIP=1 modules_install
 
-      - name: Package with AnyKernel3
+          DEST=AnyKernel3/modules/vendor/lib/modules
+          rm -rf AnyKernel3/modules
+          mkdir -p "$DEST"
+
+          # Package EVERY module the build produced. The hand-written allowlist
+          # was the original mistake: it silently omitted camera.ko and the ~30
+          # audio modules, which is exactly why camera and sound were dead.
+          find modinstall -name '*.ko' -exec cp -f {} "$DEST/" \;
+
+          # ---------------------------------------------------------------
+          # qcacld-3.0 builds in-tree as wlan.o - its Kbuild sets
+          # MODNAME := wlan whenever MODNAME arrives empty - so we get wlan.ko
+          # while the phone loads qca_cld3_wlan.ko.
+          #
+          # A plain rename is correct, and here is the proof: lsmod on the
+          # stock ROM reports the loaded module as "wlan", and modpost bakes
+          # KBUILD_MODNAME into .gnu.linkonce.this_module, so a filename can
+          # never change it. The stock file was therefore also built as wlan.o
+          # with MULTI_IF_NAME left undefined, which is why
+          # /vendor/firmware/wlan/ holds exactly one subdirectory, qca_cld.
+          # Building with MODNAME=qca_cld3_wlan would instead DEFINE
+          # MULTI_IF_NAME and send the driver hunting for a firmware directory
+          # that does not exist. Do not "fix" this into an external build.
+          # ---------------------------------------------------------------
+          if [ -f "$DEST/wlan.ko" ]; then
+            mv -f "$DEST/wlan.ko" "$DEST/qca_cld3_wlan.ko"
+          fi
+
+          find rtl8188eus -name '8188eu.ko' -exec cp -f {} "$DEST/" \; 2>/dev/null || true
+
+          echo "=== packaged $(ls -1 "$DEST" | wc -l) modules ==="
+          ls -1 "$DEST"
+
+      - name: Assert vermagic matches the device byte for byte
         run: |
-          cp out/arch/arm64/boot/Image AnyKernel3/
+          set -eu
+          DEST=AnyKernel3/modules/vendor/lib/modules
+          probe="$DEST/camera.ko"
+          if [ ! -f "$probe" ]; then
+            probe=$(find "$DEST" -name '*.ko' | head -1)
+          fi
+          got=$(strings -a "$probe" | grep -m1 '^vermagic=' | sed 's/^vermagic=//')
+          echo "probe  : $probe"
+          echo "built  : $got"
+          echo "device : $EXPECTED_VERMAGIC"
+          if [ "$got" != "$EXPECTED_VERMAGIC" ]; then
+            echo "::error::vermagic mismatch - the stock rmnet and rdbg modules would be refused, no mobile data."
+            exit 1
+          fi
+
+      - name: Verify against the device inventory
+        run: |
+          set -eu
+          DEST=AnyKernel3/modules/vendor/lib/modules
+          cat > /tmp/device_modules.txt <<'EOF'
+          adsp_loader_dlkm
+          apr_dlkm
+          aw87xxx_dlkm
+          aw882xx_dlkm
+          bolero_cdc_dlkm
+          bt_fm_slim
+          btpower
+          camera
+          machine_dlkm
+          mbhc_dlkm
+          native_dlkm
+          pa_manager_dlkm
+          pinctrl_lpi_dlkm
+          platform_dlkm
+          q6_dlkm
+          q6_notifier_dlkm
+          q6_pdr_dlkm
+          qca_cld3_wlan
+          rdbg
+          rmnet_core
+          rmnet_ctl
+          rmnet_offload
+          rmnet_shs
+          rx_macro_dlkm
+          sia81xx_dlkm
+          snd_event_dlkm
+          stub_dlkm
+          swr_ctrl_dlkm
+          swr_dlkm
+          tfa98xx-v6_dlkm
+          tx_macro_dlkm
+          va_macro_dlkm
+          wcd937x_dlkm
+          wcd937x_slave_dlkm
+          wcd938x_dlkm
+          wcd938x_slave_dlkm
+          wcd9xxx_dlkm
+          wcd_core_dlkm
+          wsa881x_analog_dlkm
+          EOF
+
+          echo "=== device /vendor/lib/modules vs this build ==="
+          while read -r m; do
+            [ -n "$m" ] || continue
+            if [ -f "$DEST/$m.ko" ]; then
+              echo "  built  $m.ko"
+            else
+              echo "  STOCK  $m.ko  (kept - relies on matching vermagic)"
+            fi
+          done < /tmp/device_modules.txt
+
+          # These four decide whether Wi-Fi, Bluetooth and the camera work at
+          # all. If any is missing the zip is not worth flashing.
+          missing=0
+          for m in qca_cld3_wlan btpower bt_fm_slim camera; do
+            if [ ! -f "$DEST/$m.ko" ]; then
+              echo "::error::$m.ko was not built - the matching feature would be dead"
+              missing=1
+            fi
+          done
+
+          # We deliberately do NOT ship modules.load / modules.dep /
+          # modules.alias / modules.softdep / modules.blocklist. The stock ones
+          # encode a real load ORDER (audio has genuine dependencies) and an
+          # alphabetical replacement would break boot. We only overwrite .ko
+          # files by name. qca_cld3_wlan is absent from stock modules.load on
+          # purpose - the Wi-Fi HAL insmods it on demand.
+          exit "$missing"
+
+      - name: Assemble the AnyKernel3 zip
+        run: |
+          set -eu
+          cp out/arch/arm64/boot/Image AnyKernel3/Image
           cd AnyKernel3
-          zip -r9 ../NetHunter-Kernel-oscar.zip *
-          
-      - name: Upload build log on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-log
-          path: build.log
+          zip -r9 "../NetHunter-Kernel-oscar-$(date -u +%Y%m%d-%H%M).zip" . -x '.git/*'
 
-      - name: Upload .config Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: kernel-config
-          path: out/.config
+      - name: Report kernel identity
+        run: |
+          set -eu
+          echo "release : $(cat out/include/config/kernel.release)"
+          strings -a out/arch/arm64/boot/Image | grep -m1 'Linux version' || true
 
-      - name: Upload Artifact
+      - name: Upload
         uses: actions/upload-artifact@v4
         with:
           name: NetHunter-Kernel-oscar
-          path: NetHunter-Kernel-oscar.zip
+          path: |
+            NetHunter-Kernel-oscar-*.zip
+            nethunter_oscar_defconfig
+            out/.config
