@@ -439,35 +439,45 @@ jobs:
           grep -nE '^(KVER|KSRC|ARCH|SUBARCH|CROSS_COMPILE|MODULE_NAME)|\$\(MAKE\)' \
             rtl8188eus/Makefile | head -30 || true
 
-          echo "=== where this fork defines CONFIG_LITTLE_ENDIAN ==="
-          grep -n 'CONFIG_LITTLE_ENDIAN' rtl8188eus/Makefile \
-            || echo "  nowhere in the Makefile - KCFLAGS below is what supplies it"
+          echo "=== the arm64 platform block we switch on ==="
+          grep -n -A 12 'ifeq ($(CONFIG_PLATFORM_ARM64_RPI), y)' rtl8188eus/Makefile \
+            || echo "  block not found - the switch name below is wrong"
 
-          # Run 32518262085 failed here with 14 errors that all trace back to a
-          # single missing preprocessor define:
-          #   rtw_byteorder.h:30   "Must be LITTLE/BIG Endian Host"
-          #   rtw_mlme_ext.h:1280  "Must be LITTLE or BIG Endian"
-          #   rtw_security.c:748   no member named '_byte_' in 'union pn48'
-          #   phydm_phystatus.h:52 'ODM_ENDIAN_TYPE' is not defined [-Wundef]
-          # This Realtek Makefile only adds -DCONFIG_LITTLE_ENDIAN from inside a
-          # CONFIG_PLATFORM_* block. Turning I386_PC off while ANDROID_ARM64
-          # selects nothing in this fork left no platform active, so the define
-          # never reached the compiler. union pn48 declares its _byte_ member
-          # under that same #ifdef, which is why an endian problem surfaced as a
-          # missing struct member.
+          # Two failed rounds, one root cause, now confirmed against the
+          # driver's own sources instead of guessed at:
           #
-          # KCFLAGS is the right lever: the kernel Makefile appends it to
-          # KBUILD_CFLAGS last, so the driver's own EXTRA_CFLAGS accumulation is
-          # untouched. A command-line EXTRA_CFLAGS= would have overridden every
-          # += in the Makefile and stripped CONFIG_IOCTL_CFG80211 with it.
-          # Command-line variables reach the driver's inner $(MAKE) through
-          # MAKEFLAGS - already proven, since that is how LLVM=1 and CC=clang
-          # got there in the failing run.
+          # 1. CONFIG_PLATFORM_ANDROID_ARM64 does not exist anywhere in this
+          #    fork - a repository-wide search returns zero hits. So
+          #    "I386_PC=n ANDROID_ARM64=y" switched the only active platform
+          #    off and switched nothing on. No platform block ran at all.
+          # 2. Every -DCONFIG_LITTLE_ENDIAN in this Makefile sits inside a
+          #    platform block (lines 1039-1934), so run 32518262085 died on
+          #    "Must be LITTLE/BIG Endian Host".
+          # 3. Those same blocks also supply -DCONFIG_IOCTL_CFG80211. With no
+          #    block active, struct _ADAPTER never got its wiphy member and
+          #    net/cfg80211.h was never included, so run 32569677606 died one
+          #    wall further along, at os_intfs.c:1645:
+          #      implicit declaration of function 'wiphy_net'
+          #      no member named 'wiphy' in 'struct _ADAPTER'
+          #    include/autoconf.h ships that define commented out, as
+          #    /* #define CONFIG_IOCTL_CFG80211 */, so the Makefile is its only
+          #    source. Supplying endianness alone just moved the wall.
+          #
+          # CONFIG_PLATFORM_ARM64_RPI is the block that fits: it supplies both
+          # -DCONFIG_LITTLE_ENDIAN and
+          # -DCONFIG_IOCTL_CFG80211 -DRTW_USE_CFG80211_STA_EVENT, and it sets
+          # ARCH with ?=, so our own ARCH, CROSS_COMPILE and KSRC still win -
+          # command-line variables override every assignment in a makefile.
+          #
+          # KCFLAGS repeats both defines deliberately. If that block turns out
+          # to supply something else, the compiler still gets what it needs;
+          # duplicate identical -D flags are harmless. Costs nothing, saves a
+          # 26-minute round trip.
           rc=0
           make -j"$(nproc)" -C rtl8188eus \
             KSRC="$PWD/out" ARCH=arm64 $KTC \
-            KCFLAGS="-DCONFIG_LITTLE_ENDIAN" \
-            CONFIG_PLATFORM_I386_PC=n CONFIG_PLATFORM_ANDROID_ARM64=y 2>&1 \
+            KCFLAGS="-DCONFIG_LITTLE_ENDIAN -DCONFIG_IOCTL_CFG80211 -DRTW_USE_CFG80211_STA_EVENT" \
+            CONFIG_PLATFORM_I386_PC=n CONFIG_PLATFORM_ARM64_RPI=y 2>&1 \
             | tee /tmp/rtl.log || rc=$?
 
           if [ "$rc" != "0" ]; then
@@ -495,6 +505,15 @@ jobs:
             echo "=== log was $(wc -l < /tmp/rtl.log) lines ==="
           else
             find rtl8188eus -name '*.ko' -exec ls -l {} \;
+
+            # The build succeeding does not prove cfg80211 got compiled in -
+            # the driver also builds in wireless-extensions-only mode, and in
+            # that mode airmon-ng cannot drive it. Check the artifact itself.
+            if strings -a rtl8188eus/8188eu.ko | grep -q cfg80211; then
+              echo "  ok    8188eu.ko carries cfg80211 symbols - nl80211 path is in"
+            else
+              echo "  WARN  no cfg80211 in 8188eu.ko - monitor mode would be wext only"
+            fi
           fi
 
           exit "$rc"
