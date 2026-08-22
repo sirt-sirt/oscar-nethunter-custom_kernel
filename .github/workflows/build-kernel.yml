@@ -415,16 +415,89 @@ jobs:
 
       # External RTL8188EUS for the TP-Link TL-WN722N v2, the only adapter here
       # that can do monitor mode and injection. Out-of-tree drivers regularly
-      # fail against LTO/CFI, and that must not throw away a good kernel.
+      # fail against LTO/CFI, and that must not throw away a good kernel - so
+      # this step may fail, but it may no longer fail SILENTLY. Run
+      # 32518262085 produced one bare annotation, "Process completed with exit
+      # code 2", which is not enough to fix anything.
       - name: Build RTL8188EUS (TL-WN722N v2)
         id: rtl
         continue-on-error: true
         run: |
           set -eu
+          set -o pipefail
           git clone --depth=1 https://github.com/aircrack-ng/rtl8188eus.git rtl8188eus
+
+          # Facts about the driver's own Makefile, gathered before invoking it.
+          # Which CONFIG_PLATFORM_* switches it actually defines decides whether
+          # CONFIG_PLATFORM_ANDROID_ARM64=y selects anything at all, and the way
+          # it recurses into the kernel decides whether our clang / ld.lld
+          # toolchain survives the hand-off or gets replaced by a hardcoded gcc
+          # prefix. Guessing at either of those has cost three rounds already.
+          echo "=== platform switches this Makefile defines ==="
+          grep -nE '^CONFIG_PLATFORM_[A-Z0-9_]+' rtl8188eus/Makefile | head -40 || true
+          echo "=== toolchain and recursion lines ==="
+          grep -nE '^(KVER|KSRC|ARCH|SUBARCH|CROSS_COMPILE|MODULE_NAME)|\$\(MAKE\)' \
+            rtl8188eus/Makefile | head -30 || true
+
+          echo "=== where this fork defines CONFIG_LITTLE_ENDIAN ==="
+          grep -n 'CONFIG_LITTLE_ENDIAN' rtl8188eus/Makefile \
+            || echo "  nowhere in the Makefile - KCFLAGS below is what supplies it"
+
+          # Run 32518262085 failed here with 14 errors that all trace back to a
+          # single missing preprocessor define:
+          #   rtw_byteorder.h:30   "Must be LITTLE/BIG Endian Host"
+          #   rtw_mlme_ext.h:1280  "Must be LITTLE or BIG Endian"
+          #   rtw_security.c:748   no member named '_byte_' in 'union pn48'
+          #   phydm_phystatus.h:52 'ODM_ENDIAN_TYPE' is not defined [-Wundef]
+          # This Realtek Makefile only adds -DCONFIG_LITTLE_ENDIAN from inside a
+          # CONFIG_PLATFORM_* block. Turning I386_PC off while ANDROID_ARM64
+          # selects nothing in this fork left no platform active, so the define
+          # never reached the compiler. union pn48 declares its _byte_ member
+          # under that same #ifdef, which is why an endian problem surfaced as a
+          # missing struct member.
+          #
+          # KCFLAGS is the right lever: the kernel Makefile appends it to
+          # KBUILD_CFLAGS last, so the driver's own EXTRA_CFLAGS accumulation is
+          # untouched. A command-line EXTRA_CFLAGS= would have overridden every
+          # += in the Makefile and stripped CONFIG_IOCTL_CFG80211 with it.
+          # Command-line variables reach the driver's inner $(MAKE) through
+          # MAKEFLAGS - already proven, since that is how LLVM=1 and CC=clang
+          # got there in the failing run.
+          rc=0
           make -j"$(nproc)" -C rtl8188eus \
             KSRC="$PWD/out" ARCH=arm64 $KTC \
-            CONFIG_PLATFORM_I386_PC=n CONFIG_PLATFORM_ANDROID_ARM64=y
+            KCFLAGS="-DCONFIG_LITTLE_ENDIAN" \
+            CONFIG_PLATFORM_I386_PC=n CONFIG_PLATFORM_ANDROID_ARM64=y 2>&1 \
+            | tee /tmp/rtl.log || rc=$?
+
+          if [ "$rc" != "0" ]; then
+            echo "### dongle driver failed, rc=$rc"
+
+            echo "=== compiler and linker diagnostics ==="
+            grep -nE ' (error|fatal error):|^ld\.lld: error:|No such file|undefined (symbol|reference)|Nothing to be done|command not found' \
+              /tmp/rtl.log | head -40 || echo "  nothing matched"
+
+            echo "=== make failure lines ==="
+            grep -nE '^make(\[[0-9]+\])?: \*\*\*' /tmp/rtl.log | head -20 || true
+
+            echo "=== context around the first diagnostic ==="
+            n=$(grep -nE ' (error|fatal error):|^ld\.lld: error:' /tmp/rtl.log \
+              | head -1 | cut -d: -f1 || true)
+            if [ -n "${n:-}" ]; then
+              s=1
+              [ "$n" -gt 30 ] && s=$((n - 30))
+              sed -n "${s},$((n + 30))p" /tmp/rtl.log
+            else
+              echo "  no diagnostic matched - tail of the log follows:"
+              tail -120 /tmp/rtl.log
+            fi
+
+            echo "=== log was $(wc -l < /tmp/rtl.log) lines ==="
+          else
+            find rtl8188eus -name '*.ko' -exec ls -l {} \;
+          fi
+
+          exit "$rc"
 
       - name: Install and package modules
         run: |
