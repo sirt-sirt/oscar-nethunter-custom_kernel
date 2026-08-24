@@ -41,10 +41,10 @@ LAYOUT_NAMES = {
     4: "COMPRESSION",
 }
 
-# xattr name indices, from include/erofs_fs.h. 4 is "security.".
+# xattr name indices, from include/erofs_fs.h. 6 is "security.".
 XATTR_PREFIX = {1: "user.", 2: "system.posix_acl_access",
-                3: "system.posix_acl_default", 4: "security.",
-                5: "trusted.", 6: "", 7: "system."}
+                3: "system.posix_acl_default", 4: "trusted.",
+                6: "security.", 7: "system."}
 
 EXPECTED_META = [
     "/etc",
