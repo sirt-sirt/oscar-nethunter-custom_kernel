@@ -174,7 +174,7 @@ echo "  ok      --file-contexts is supported"
 # LZ4 is not a preference, it is the only legal choice. erofs on Linux 5.4
 # supports LZ4 only; LZMA needs 5.16, DEFLATE 6.6, zstd 6.10. An image built
 # with any of those mounts on the build host and fails on the phone.
-BASE="-zlz4hc --all-root --file-contexts=$REF/file_contexts"
+BASE="-zlz4hc --all-root --mount-point=/ --file-contexts=$REF/file_contexts"
 EXTRA="-U $STOCK_UUID -T $STOCK_TIME"
 
 rm -f "$OUTIMG"
