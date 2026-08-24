@@ -202,19 +202,23 @@ jobs:
           cat /tmp/eprobe.log  2>/dev/null || true
           cat /tmp/eprobe.dump 2>/dev/null || true
 
-          # v1.4 on purpose: it is what jammy ships and it writes
-          # feature_incompat 0x1, exactly like the stock partition. 1.5 adds
-          # ztailpacking, 1.6 adds fragments and dedupe; both need kernel 5.16+
-          # and would produce an image this 5.4 kernel cannot mount.
-          echo "### building erofs-utils v1.4 from source with SELinux support"
+          # v1.7.2, NOT v1.4. Build 10 proved v1.4 accepts --file-contexts
+          # but never actually calls selabel_lookup — every file comes out
+          # unlabelled. v1.7.2 properly applies labels. The on-disk format
+          # stays compatible with our 5.4 kernel because the new features
+          # (ztailpacking in 1.5, fragments/dedupe in 1.6) are gated behind
+          # explicit -E flags we never pass; with plain -zlz4hc the output
+          # carries feature_incompat 0x1, exactly like the stock partition.
+          # verify-erofs.py asserts on that value and would catch a mismatch.
+          echo "### building erofs-utils v1.7.2 from source with SELinux support"
           sudo apt-get install -y --no-install-recommends \
             autoconf automake libtool pkg-config \
             liblz4-dev liblzma-dev zlib1g-dev uuid-dev libselinux1-dev
 
           rm -rf /tmp/eu
-          git clone --depth=1 -b v1.4 \
+          git clone --depth=1 -b v1.7.2 \
             https://git.kernel.org/pub/scm/linux/kernel/git/xiang/erofs-utils.git /tmp/eu \
-            || git clone --depth=1 -b v1.4 https://github.com/erofs/erofs-utils.git /tmp/eu
+            || git clone --depth=1 -b v1.7.2 https://github.com/erofs/erofs-utils.git /tmp/eu
 
           cd /tmp/eu
           ./autogen.sh
