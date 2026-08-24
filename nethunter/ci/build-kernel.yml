@@ -183,7 +183,7 @@ jobs:
             mkdir -p /tmp/eprobe/lib/modules /tmp/eprobe/etc
             printf 'x' > /tmp/eprobe/lib/modules/probe.ko
             printf 'x' > /tmp/eprobe/etc/build.prop
-            mkfs.erofs -zlz4hc --all-root --mount-point=/ \
+            mkfs.erofs -zlz4hc --all-root \
               --file-contexts=nethunter/vendor_dlkm/file_contexts \
               /tmp/eprobe.img /tmp/eprobe > /tmp/eprobe.log 2>&1 || return 1
             python3 nethunter/verify-erofs.py dump /tmp/eprobe.img \
