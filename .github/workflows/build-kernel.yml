@@ -185,7 +185,8 @@ jobs:
             printf 'x' > /tmp/eprobe/etc/build.prop
             mkfs.erofs -zlz4hc --all-root \
               --file-contexts=nethunter/vendor_dlkm/file_contexts \
-              /tmp/eprobe.img /tmp/eprobe > /tmp/eprobe.log 2>&1 || return 1
+              /tmp/eprobe.img /tmp/eprobe > /tmp/eprobe.log 2>&1 || { cat /tmp/eprobe.log; return 1; }
+            cat /tmp/eprobe.log
             python3 nethunter/verify-erofs.py dump /tmp/eprobe.img \
               > /tmp/eprobe.dump 2>&1 || return 1
             grep -q 'u:object_r:vendor_file:s0'         /tmp/eprobe.dump || return 1
@@ -221,10 +222,46 @@ jobs:
             || git clone --depth=1 -b v1.7.1 https://github.com/erofs/erofs-utils.git /tmp/eu
 
           cd /tmp/eu
-          # Patch erofs-utils to disable SELinux validation, otherwise Ubuntu's
-          # libselinux drops all Android contexts as 'invalid'.
-          sed -i 's/SELABEL_OPT_PATH, .value = file_contexts }/SELABEL_OPT_PATH, .value = file_contexts }, { .type = 1, .value = (void*)0 }/g' lib/config.c
-          sed -i 's/seopts, 1/seopts, 2/g' lib/config.c
+          cat << 'EOF' > debug.patch
+          --- a/lib/xattr.c
+          +++ b/lib/xattr.c
+          @@ -309,6 +309,9 @@ static struct xattr_item *erofs_get_selabel_xattr(const char *srcpath,
+           		if (ret <= 0)
+           			return ERR_PTR(-ENOMEM);
+           
+           		ret = selabel_lookup(cfg.sehnd, &secontext, fspath, mode);
+          +		fprintf(stderr, "DEBUG_SELINUX: fspath='%s' mode=%d ret=%d\n", fspath, (int)mode, ret);
+          +		if (ret == 0) fprintf(stderr, "DEBUG_SELINUX: secontext='%s'\n", secontext);
+           		free(fspath);
+           
+           		if (ret) {
+          --- a/lib/config.c
+          +++ b/lib/config.c
+          @@ -75,9 +75,9 @@ const char *erofs_fspath(const char *fullpath)
+           #ifdef HAVE_LIBSELINUX
+           int erofs_selabel_open(const char *file_contexts)
+           {
+          -	struct selinux_opt seopts[] = {
+          -		{ .type = SELABEL_OPT_PATH, .value = file_contexts }
+          -	};
+          +	struct selinux_opt seopts[] = {
+          +		{ .type = SELABEL_OPT_PATH, .value = file_contexts },
+          +		{ .type = 1, .value = (void*)0 }
+          +	};
+           
+           	if (cfg.sehnd) {
+           		erofs_info("ignore duplicated file contexts \"%s\"",
+          @@ -85,7 +85,7 @@ int erofs_selabel_open(const char *file_contexts)
+           		return -EBUSY;
+           	}
+           
+          -	cfg.sehnd = selabel_open(SELABEL_CTX_FILE, seopts, 1);
+          +	cfg.sehnd = selabel_open(SELABEL_CTX_FILE, seopts, 2);
+           	if (!cfg.sehnd) {
+           		erofs_err("failed to open file contexts \"%s\"",
+           			  file_contexts);
+          EOF
+          git apply debug.patch
           ./autogen.sh
           ./configure --with-selinux --without-fuse
           make -j"$(nproc)"
