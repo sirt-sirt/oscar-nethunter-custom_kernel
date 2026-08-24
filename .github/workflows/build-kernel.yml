@@ -221,6 +221,10 @@ jobs:
             || git clone --depth=1 -b v1.7.1 https://github.com/erofs/erofs-utils.git /tmp/eu
 
           cd /tmp/eu
+          # Patch erofs-utils to disable SELinux validation, otherwise Ubuntu's
+          # libselinux drops all Android contexts as 'invalid'.
+          sed -i 's/SELABEL_OPT_PATH, .value = file_contexts }/SELABEL_OPT_PATH, .value = file_contexts }, { .type = 1, .value = (void*)0 }/g' lib/config.c
+          sed -i 's/seopts, 1/seopts, 2/g' lib/config.c
           ./autogen.sh
           ./configure --with-selinux --without-fuse
           make -j"$(nproc)"
