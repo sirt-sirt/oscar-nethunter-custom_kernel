@@ -187,6 +187,9 @@ jobs:
               --file-contexts=nethunter/vendor_dlkm/file_contexts \
               /tmp/eprobe.img /tmp/eprobe > /tmp/eprobe.log 2>&1 || { cat /tmp/eprobe.log; return 1; }
             cat /tmp/eprobe.log
+            echo "--- HEXDUMP START ---"
+            hexdump -C /tmp/eprobe.img
+            echo "--- HEXDUMP END ---"
             python3 nethunter/verify-erofs.py dump /tmp/eprobe.img \
               > /tmp/eprobe.dump 2>&1 || return 1
             grep -q 'u:object_r:vendor_file:s0'         /tmp/eprobe.dump || return 1
