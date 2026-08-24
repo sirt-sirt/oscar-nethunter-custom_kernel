@@ -202,23 +202,23 @@ jobs:
           cat /tmp/eprobe.log  2>/dev/null || true
           cat /tmp/eprobe.dump 2>/dev/null || true
 
-          # v1.7.2, NOT v1.4. Build 10 proved v1.4 accepts --file-contexts
+          # v1.7.1, NOT v1.4. Build 10 proved v1.4 accepts --file-contexts
           # but never actually calls selabel_lookup — every file comes out
-          # unlabelled. v1.7.2 properly applies labels. The on-disk format
+          # unlabelled. v1.7.1 properly applies labels. The on-disk format
           # stays compatible with our 5.4 kernel because the new features
           # (ztailpacking in 1.5, fragments/dedupe in 1.6) are gated behind
           # explicit -E flags we never pass; with plain -zlz4hc the output
           # carries feature_incompat 0x1, exactly like the stock partition.
           # verify-erofs.py asserts on that value and would catch a mismatch.
-          echo "### building erofs-utils v1.7.2 from source with SELinux support"
+          echo "### building erofs-utils v1.7.1 from source with SELinux support"
           sudo apt-get install -y --no-install-recommends \
             autoconf automake libtool pkg-config \
             liblz4-dev liblzma-dev zlib1g-dev uuid-dev libselinux1-dev
 
           rm -rf /tmp/eu
-          git clone --depth=1 -b v1.7.2 \
+          git clone --depth=1 -b v1.7.1 \
             https://git.kernel.org/pub/scm/linux/kernel/git/xiang/erofs-utils.git /tmp/eu \
-            || git clone --depth=1 -b v1.7.2 https://github.com/erofs/erofs-utils.git /tmp/eu
+            || git clone --depth=1 -b v1.7.1 https://github.com/erofs/erofs-utils.git /tmp/eu
 
           cd /tmp/eu
           ./autogen.sh
