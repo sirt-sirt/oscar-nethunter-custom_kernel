@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # =============================================================================
-# Add the missing symbol-namespace import to the aircrack-ng rtl8188eus fork.
+# NetHunter patches for the aircrack-ng rtl8188eus fork.
 #
 #   bash nethunter/patch-rtl8188eus.sh <path-to-cloned-driver>
+#
+# Patch 1 - MODULE_IMPORT_NS(VFS_internal_...)
 #
 # Run 32571447245 built the driver cleanly and still ended with:
 #
@@ -22,33 +24,149 @@
 # Guarded on the macro itself rather than on LINUX_VERSION_CODE: MODULE_IMPORT_NS
 # either exists in linux/module.h or it does not, and #ifdef answers that
 # question without assuming which backport a vendor tree happens to carry.
+#
+# Patch 2 - ndo_start_xmit signatures must return netdev_tx_t (clang CFI)
+#
+# oscar ships CONFIG_CFI_CLANG=y + LTO. CFI compares the canonical type hash of
+# the callee against the function-pointer type at every INDIRECT call. The
+# kernel's net_device_ops slot is:
+#
+#   netdev_tx_t (*ndo_start_xmit)(struct sk_buff *, struct net_device *);
+#
+# but this driver declares all four xmit handlers as plain `int` functions:
+#
+#   os_dep/linux/xmit_linux.c:443      int _rtw_xmit_entry(...)
+#   os_dep/linux/xmit_linux.c:516      int rtw_xmit_entry(...)
+#   os_dep/linux/mlme_linux.c:276      static int mgnt_xmit_entry(...)
+#   os_dep/linux/ioctl_cfg80211.c:4284 static int rtw_cfg80211_monitor_if_xmit_entry(...)
+#
+# int (*)(...) hashes differently from enum netdev_tx (*)(...), so the first
+# transmitted frame dies in __cfi_check_fail. That is exactly the observed
+# crash: `ip link set wlanX up` starts IPv6 DAD/MLD, the first packet goes out
+# through dev_hard_start_xmit -> ndo_start_xmit and the kernel panics with
+# "Fatal exception in interrupt" (console-ramoops-0, pc = __cfi_check_fail).
+#
+# Fix: retype the four definitions/prototypes to netdev_tx_t
+# (= typedef enum netdev_tx netdev_tx_t, include/linux/netdevice.h). Bodies are
+# untouched - they only ever return 0 (== NETDEV_TX_OK) or propagate an int,
+# both of which convert to/from the enum legally.
+#
+# Every substitution below is anchored (^...$) and verified after sed; if an
+# anchor does not match because upstream moved, fail loudly instead of
+# building a module we cannot trust.
 # =============================================================================
 set -euo pipefail
 
 SRC="${1:?usage: patch-rtl8188eus.sh <driver-source-dir>}"
+status=0
+
+ok()  { echo "  ok      $*"; }
+bad() { echo "::error::$*"; status=1; }
+
+# -----------------------------------------------------------------------------
+# Patch 1: symbol namespace import
+# -----------------------------------------------------------------------------
 F="$SRC/os_dep/linux/os_intfs.c"
-
 if [ ! -f "$F" ]; then
-  echo "::error::$F not found - the driver layout changed"
-  exit 1
+  bad "$F not found - the driver layout changed"
+elif grep -q 'MODULE_IMPORT_NS' "$F"; then
+  ok "MODULE_IMPORT_NS already present in os_intfs.c"
+else
+  {
+    printf '\n'
+    printf '/* NetHunter: rtw_retrieve_from_file() calls kernel_read(), which lives in\n'
+    printf ' * the VFS symbol namespace since Linux 5.4. Without this import modpost\n'
+    printf ' * only warns, and the module is then REFUSED at insmod time because\n'
+    printf ' * CONFIG_MODULE_ALLOW_MISSING_NAMESPACE_IMPORTS is not set on oscar. */\n'
+    printf '#ifdef MODULE_IMPORT_NS\n'
+    printf 'MODULE_IMPORT_NS(VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver);\n'
+    printf '#endif\n'
+  } >> "$F"
+  if grep -q 'MODULE_IMPORT_NS' "$F"; then
+    ok "appended MODULE_IMPORT_NS to os_intfs.c"
+  else
+    bad "failed to append MODULE_IMPORT_NS to $F"
+  fi
 fi
 
-if grep -q 'MODULE_IMPORT_NS' "$F"; then
-  echo "  ok      MODULE_IMPORT_NS already present in os_intfs.c"
-  exit 0
+# -----------------------------------------------------------------------------
+# Patch 2: CFI-correct ndo_start_xmit signatures
+# -----------------------------------------------------------------------------
+
+# Prototypes shared by every caller of the xmit entries. The PLATFORM_LINUX
+# section is what matters; the identical FreeBSD-section lines also match the
+# sed and get retyped too - that section never compiles on Linux, harmless.
+F="$SRC/include/xmit_osdep.h"
+if [ ! -f "$F" ]; then
+  bad "$F not found - the driver layout changed"
+elif grep -q 'extern netdev_tx_t rtw_xmit_entry' "$F"; then
+  ok "xmit_osdep.h already retyped"
+else
+  sed -i \
+    -e 's/^extern int _rtw_xmit_entry(_pkt \*pkt, _nic_hdl pnetdev);$/extern netdev_tx_t _rtw_xmit_entry(_pkt *pkt, _nic_hdl pnetdev);/' \
+    -e 's/^extern int rtw_xmit_entry(_pkt \*pkt, _nic_hdl pnetdev);$/extern netdev_tx_t rtw_xmit_entry(_pkt *pkt, _nic_hdl pnetdev);/' \
+    "$F"
+  if grep -q '^extern netdev_tx_t _rtw_xmit_entry(_pkt \*pkt, _nic_hdl pnetdev);$' "$F" && \
+     grep -q '^extern netdev_tx_t rtw_xmit_entry(_pkt \*pkt, _nic_hdl pnetdev);$' "$F"; then
+    ok "retyped _rtw_xmit_entry/rtw_xmit_entry prototypes in xmit_osdep.h"
+  else
+    bad "xmit_osdep.h anchors not found - upstream prototype changed"
+  fi
 fi
 
-{
-  printf '\n'
-  printf '/* NetHunter: rtw_retrieve_from_file() calls kernel_read(), which lives in\n'
-  printf ' * the VFS symbol namespace since Linux 5.4. Without this import modpost\n'
-  printf ' * only warns, and the module is then REFUSED at insmod time because\n'
-  printf ' * CONFIG_MODULE_ALLOW_MISSING_NAMESPACE_IMPORTS is not set on oscar. */\n'
-  printf '#ifdef MODULE_IMPORT_NS\n'
-  printf 'MODULE_IMPORT_NS(VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver);\n'
-  printf '#endif\n'
-} >> "$F"
+F="$SRC/os_dep/linux/xmit_linux.c"
+if [ ! -f "$F" ]; then
+  bad "$F not found - the driver layout changed"
+elif grep -q '^netdev_tx_t rtw_xmit_entry' "$F"; then
+  ok "xmit_linux.c already retyped"
+else
+  sed -i \
+    -e 's/^int _rtw_xmit_entry(_pkt \*pkt, _nic_hdl pnetdev)$/netdev_tx_t _rtw_xmit_entry(_pkt *pkt, _nic_hdl pnetdev)/' \
+    -e 's/^int rtw_xmit_entry(_pkt \*pkt, _nic_hdl pnetdev)$/netdev_tx_t rtw_xmit_entry(_pkt *pkt, _nic_hdl pnetdev)/' \
+    "$F"
+  if grep -q '^netdev_tx_t _rtw_xmit_entry(_pkt \*pkt, _nic_hdl pnetdev)$' "$F" && \
+     grep -q '^netdev_tx_t rtw_xmit_entry(_pkt \*pkt, _nic_hdl pnetdev)$' "$F"; then
+    ok "retyped _rtw_xmit_entry/rtw_xmit_entry definitions in xmit_linux.c"
+  else
+    bad "xmit_linux.c anchors not found - upstream definition changed"
+  fi
+fi
 
-echo "  ok      appended MODULE_IMPORT_NS to os_intfs.c"
-echo "=== tail of os_intfs.c ==="
-tail -n 9 "$F"
+F="$SRC/os_dep/linux/mlme_linux.c"
+if [ ! -f "$F" ]; then
+  bad "$F not found - the driver layout changed"
+elif grep -q '^static netdev_tx_t mgnt_xmit_entry' "$F"; then
+  ok "mlme_linux.c already retyped"
+else
+  sed -i \
+    -e 's/^static int mgnt_xmit_entry(struct sk_buff \*skb, struct net_device \*pnetdev)$/static netdev_tx_t mgnt_xmit_entry(struct sk_buff *skb, struct net_device *pnetdev)/' \
+    "$F"
+  if grep -q '^static netdev_tx_t mgnt_xmit_entry(struct sk_buff \*skb, struct net_device \*pnetdev)$' "$F"; then
+    ok "retyped mgnt_xmit_entry in mlme_linux.c"
+  else
+    bad "mgnt_xmit_entry anchor not found - upstream definition changed"
+  fi
+fi
+
+F="$SRC/os_dep/linux/ioctl_cfg80211.c"
+if [ ! -f "$F" ]; then
+  bad "$F not found - the driver layout changed"
+elif grep -q '^static netdev_tx_t rtw_cfg80211_monitor_if_xmit_entry' "$F"; then
+  ok "ioctl_cfg80211.c already retyped"
+else
+  sed -i \
+    -e 's/^static int rtw_cfg80211_monitor_if_xmit_entry(struct sk_buff \*skb, struct net_device \*ndev)$/static netdev_tx_t rtw_cfg80211_monitor_if_xmit_entry(struct sk_buff *skb, struct net_device *ndev)/' \
+    "$F"
+  if grep -q '^static netdev_tx_t rtw_cfg80211_monitor_if_xmit_entry(struct sk_buff \*skb, struct net_device \*ndev)$' "$F"; then
+    ok "retyped rtw_cfg80211_monitor_if_xmit_entry in ioctl_cfg80211.c"
+  else
+    bad "rtw_cfg80211_monitor_if_xmit_entry anchor not found - upstream definition changed"
+  fi
+fi
+
+if [ "$status" -eq 0 ]; then
+  echo "=== all rtl8188eus patches applied ==="
+else
+  echo "=== one or more patches FAILED - do not ship this build ==="
+fi
+exit "$status"
