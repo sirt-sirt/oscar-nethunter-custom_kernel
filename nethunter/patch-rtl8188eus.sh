@@ -284,16 +284,16 @@ fi
 # correct prototypes it is pure noise, and its absence is what makes a future
 # upstream signature change fail the build instead of passing CFI runtime.
 for pair in \
-  "$SRC/hal/hal_hci/hal_usb.c usb_recv_tasklet," \
-  "$SRC/hal/rtl8188e/usb/rtl8188eu_xmit.c rtl8188eu_xmit_tasklet," ; do
-  F="${pair% *}"; FN="${pair#* }"
+  "$SRC/hal/hal_hci/hal_usb.c|usb_recv_tasklet," \
+  "$SRC/hal/rtl8188e/usb/rtl8188eu_xmit.c|rtl8188eu_xmit_tasklet," ; do
+  F="${pair%|*}"; FN="${pair#*|}"
   if [ ! -f "$F" ]; then
     bad "$F not found - the driver layout changed"
   elif ! grep -q "(void(\*)(unsigned long))$FN" "$F"; then
     ok "cast already gone: $FN"
   else
     sed -i -E "s/\(void\(\*\)\(unsigned long\)\)$FN/$FN/" "$F"
-    if ! grep -q "(void(\*)(unsigned long))$FN" "$F" && grep -Eq "^[ \t]*$FN\$" "$F"; then
+    if ! grep -q "(void(\*)(unsigned long))$FN" "$F" && grep -Eq "^[[:space:]]*$FN\$" "$F"; then
       ok "dropped stale cast for $FN"
     else
       bad "failed to remove cast for $FN in $F"
