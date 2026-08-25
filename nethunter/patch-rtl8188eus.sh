@@ -51,9 +51,38 @@
 # untouched - they only ever return 0 (== NETDEV_TX_OK) or propagate an int,
 # both of which convert to/from the enum legally.
 #
-# Every substitution below is anchored (^...$) and verified after sed; if an
-# anchor does not match because upstream moved, fail loudly instead of
-# building a module we cannot trust.
+# Patch 3 - tasklet callbacks must take unsigned long (same CFI class)
+#
+# Second crash, this time in monitor mode: pc = __cfi_check_fail [8188eu],
+# Call trace = tasklet_action_common -> __do_softirq. On Linux 5.4
+# tasklet_init() takes void (*func)(unsigned long). The fork declares its
+# three tasklet handlers as void f(void *priv) and papers over the difference
+# with a cast at every tasklet_init() call site:
+#
+#   os_dep/linux/usb_ops_linux.c:729/867  void usb_recv_tasklet(void *priv)
+#   hal/rtl8188e/usb/usb_ops_linux.c:248  void rtl8188eu_xmit_tasklet(void *priv)
+#   core/mesh/rtw_mesh.c:2306             static void mpath_tx_tasklet_hdl(void *priv)
+#
+# A cast silences the compiler but not CFI: tasklet_action_common does an
+# indirect call typed void (*)(unsigned long) while the callee's __cfi_check
+# was generated for void (*)(void *). Idle managed mode never fired these
+# (no RX, TX dropped as unassociated) - monitor mode floods RX beacons and
+# the recv tasklet detonated instantly.
+#
+# Fix: declare the handlers exactly as void f(unsigned long priv) - including
+# the two prototypes in include/usb_ops_linux.h and include/rtl8188e_xmit.h -
+# and drop the lying casts so nothing hides future drift. Bodies stay valid:
+# they only do (_adapter *)priv.
+#
+# Work items need nothing: _workitem is typedef'd to struct work_struct
+# (osdep_service_linux.h:214) and every callback is declared with it, so their
+# hashes already match INIT_WORK. Driver timers go through a self-owned
+# trampoline (_init_timer / timer_hdl) whose internal pointer types agree -
+# proven live by the watchdog ticking through the whole first test.
+#
+# Every substitution below is anchored and verified after sed; if an anchor
+# does not match because upstream moved, fail loudly instead of building a
+# module we cannot trust.
 # =============================================================================
 set -euo pipefail
 
@@ -161,6 +190,124 @@ else
     ok "retyped rtw_cfg80211_monitor_if_xmit_entry in ioctl_cfg80211.c"
   else
     bad "rtw_cfg80211_monitor_if_xmit_entry anchor not found - upstream definition changed"
+  fi
+fi
+
+# -----------------------------------------------------------------------------
+# Patch 3: CFI-correct tasklet callbacks (unsigned long, no casts)
+# -----------------------------------------------------------------------------
+
+# Two identical definitions in this file (CONFIG_USE_USB_BUFFER_ALLOC_RX
+# variants) plus the shared prototype in include/usb_ops_linux.h.
+F="$SRC/os_dep/linux/usb_ops_linux.c"
+if [ ! -f "$F" ]; then
+  bad "$F not found - the driver layout changed"
+elif grep -q '^void usb_recv_tasklet(unsigned long priv)$' "$F"; then
+  ok "usb_ops_linux.c already retyped"
+else
+  sed -i \
+    -e 's/^void usb_recv_tasklet(void \*priv)$/void usb_recv_tasklet(unsigned long priv)/' \
+    "$F"
+  n=$(grep -c '^void usb_recv_tasklet(unsigned long priv)$' "$F")
+  if [ "$n" -eq 2 ]; then
+    ok "retyped both usb_recv_tasklet definitions in usb_ops_linux.c"
+  else
+    bad "expected 2 usb_recv_tasklet definitions after sed, found $n"
+  fi
+fi
+
+F="$SRC/include/usb_ops_linux.h"
+if [ ! -f "$F" ]; then
+  bad "$F not found - the driver layout changed"
+elif grep -q '^void usb_recv_tasklet(unsigned long priv);$' "$F"; then
+  ok "usb_ops_linux.h already retyped"
+else
+  sed -i \
+    -e 's/^void usb_recv_tasklet(void \*priv);$/void usb_recv_tasklet(unsigned long priv);/' \
+    "$F"
+  if grep -q '^void usb_recv_tasklet(unsigned long priv);$' "$F"; then
+    ok "retyped usb_recv_tasklet prototype in usb_ops_linux.h"
+  else
+    bad "usb_recv_tasklet prototype anchor not found in usb_ops_linux.h"
+  fi
+fi
+
+F="$SRC/hal/rtl8188e/usb/usb_ops_linux.c"
+if [ ! -f "$F" ]; then
+  bad "$F not found - the driver layout changed"
+elif grep -q '^void rtl8188eu_xmit_tasklet(unsigned long priv)$' "$F"; then
+  ok "rtl8188e xmit tasklet already retyped"
+else
+  sed -i \
+    -e 's/^void rtl8188eu_xmit_tasklet(void \*priv)$/void rtl8188eu_xmit_tasklet(unsigned long priv)/' \
+    "$F"
+  if grep -q '^void rtl8188eu_xmit_tasklet(unsigned long priv)$' "$F"; then
+    ok "retyped rtl8188eu_xmit_tasklet definition"
+  else
+    bad "rtl8188eu_xmit_tasklet anchor not found"
+  fi
+fi
+
+F="$SRC/include/rtl8188e_xmit.h"
+if [ ! -f "$F" ]; then
+  bad "$F not found - the driver layout changed"
+elif grep -q 'void rtl8188eu_xmit_tasklet(unsigned long priv);' "$F"; then
+  ok "rtl8188e_xmit.h already retyped"
+else
+  sed -i \
+    -e 's/\tvoid rtl8188eu_xmit_tasklet(void \*priv);$/\tvoid rtl8188eu_xmit_tasklet(unsigned long priv);/' \
+    "$F"
+  if grep -q 'void rtl8188eu_xmit_tasklet(unsigned long priv);' "$F"; then
+    ok "retyped rtl8188eu_xmit_tasklet prototype in rtl8188e_xmit.h"
+  else
+    bad "rtl8188eu_xmit_tasklet prototype anchor not found in rtl8188e_xmit.h"
+  fi
+fi
+
+F="$SRC/core/mesh/rtw_mesh.c"
+if [ ! -f "$F" ]; then
+  bad "$F not found - the driver layout changed"
+elif grep -q '^static void mpath_tx_tasklet_hdl(unsigned long priv)$' "$F"; then
+  ok "rtw_mesh.c already retyped"
+else
+  sed -i \
+    -e 's/^static void mpath_tx_tasklet_hdl(void \*priv)$/static void mpath_tx_tasklet_hdl(unsigned long priv)/' \
+    "$F"
+  if grep -q '^static void mpath_tx_tasklet_hdl(unsigned long priv)$' "$F"; then
+    ok "retyped mpath_tx_tasklet_hdl in rtw_mesh.c"
+  else
+    bad "mpath_tx_tasklet_hdl anchor not found"
+  fi
+fi
+
+# Drop the three lying casts. A cast hides type drift from the compiler; with
+# correct prototypes it is pure noise, and its absence is what makes a future
+# upstream signature change fail the build instead of passing CFI runtime.
+for pair in \
+  "$SRC/hal/hal_hci/hal_usb.c usb_recv_tasklet," \
+  "$SRC/hal/rtl8188e/usb/rtl8188eu_xmit.c rtl8188eu_xmit_tasklet," ; do
+  F="${pair% *}"; FN="${pair#* }"
+  if [ ! -f "$F" ]; then
+    bad "$F not found - the driver layout changed"
+  elif ! grep -q "(void(\*)(unsigned long))$FN" "$F"; then
+    ok "cast already gone: $FN"
+  else
+    sed -i -E "s/\(void\(\*\)\(unsigned long\)\)$FN/$FN/" "$F"
+    if ! grep -q "(void(\*)(unsigned long))$FN" "$F" && grep -Eq "^[ \t]*$FN\$" "$F"; then
+      ok "dropped stale cast for $FN"
+    else
+      bad "failed to remove cast for $FN in $F"
+    fi
+  fi
+done
+
+F="$SRC/core/mesh/rtw_mesh.c"
+if [ -f "$F" ] && grep -q '(void(\*)(unsigned long))mpath_tx_tasklet_hdl' "$F"; then
+  sed -i -E 's/, \(void\(\*\)\(unsigned long\)\)mpath_tx_tasklet_hdl/, mpath_tx_tasklet_hdl/' "$F"
+  if grep -q ', mpath_tx_tasklet_hdl$' "$F"; then
+    ok "dropped stale cast for mpath_tx_tasklet_hdl"
+  else
+    bad "failed to remove cast for mpath_tx_tasklet_hdl"
   fi
 fi
 
