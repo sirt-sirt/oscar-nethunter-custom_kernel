@@ -57,10 +57,10 @@ device.name6=RMX3472 (RE54CBL1)
 #
 # "block=boot" plus "is_slot_device=1" makes AnyKernel append the current
 # slot suffix on its own.
-block=boot;
-is_slot_device=1;
-ramdisk_compression=auto;
-patch_vbmeta_flag=auto;
+BLOCK=boot;
+IS_SLOT_DEVICE=1;
+RAMDISK_COMPRESSION=auto;
+PATCH_VBMETA_FLAG=auto;
 
 
 ## AnyKernel methods (DO NOT CHANGE)
